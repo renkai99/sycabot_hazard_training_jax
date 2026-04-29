@@ -1,0 +1,21 @@
+# Core JAX stack  (versions matched to installed venv)
+jax==0.10.0
+jaxlib==0.10.0
+flax==0.12.7
+optax==0.2.8
+chex==0.1.91
+
+# Gymnax (Environment base class)
+gymnax==0.0.9
+
+# Numerics / plotting
+numpy==2.4.4
+scipy==1.17.1
+matplotlib==3.10.9
+
+# Progress bar
+tqdm==4.67.3
+
+# Rendering (optional – only needed for sycabot_render_jax.py and --render mode)
+# Install with:  pip install pygame
+pygame>=2.5
