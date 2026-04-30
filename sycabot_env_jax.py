@@ -341,12 +341,15 @@ class SycaBotEnvJAX(environment.Environment):
         return self.get_obs(state, params), state
 
     def get_obs(self, state: EnvState, params: EnvParams) -> chex.Array:
-        # Robot block (21 features per robot):
-        #   x, y, theta, alive, carrying,
+        # Robot block (22 features per robot):
+        #   x, y, sin(theta), cos(theta), alive, carrying,
         #   task_d, task_orient,
         #   exit_d, exit_orient,
         #   fire1_d, fire1_o, fire2_d, fire2_o, fire3_d, fire3_o,
         #   obs1_d, obs1_o, obs2_d, obs2_o, obs3_d, obs3_o
+        # Task block (4 per task): x, y, status, carried
+        # Global: safety_indicator, task_indicator
+        # Action history: prev_joint_action (2*NUM_ROBOTS)
         robot_feats = []
         for i in range(NUM_ROBOTS):
             p  = state.robot_pos[i]
@@ -355,7 +358,7 @@ class SycaBotEnvJAX(environment.Environment):
             fire_d, fire_o = self._top3_fire_dist_orient(p, th, state.fire_grid)
             robot_feats += [
                 p[0], p[1],
-                th,
+                jnp.sin(th), jnp.cos(th),
                 state.robot_alive[i],
                 state.robot_carrying[i],
                 self._nearest_task_dist(p, state.task_pos, state.task_status),
@@ -388,6 +391,7 @@ class SycaBotEnvJAX(environment.Environment):
             jnp.array(robot_feats, dtype=jnp.float32),
             jnp.array(task_feats, dtype=jnp.float32),
             jnp.array([state.global_safety_indicator, task_indicator]),
+            state.prev_joint_action,
         ])
         return jnp.nan_to_num(obs, nan=0.0)
 
@@ -621,5 +625,5 @@ class SycaBotEnvJAX(environment.Environment):
         return spaces.Box(low=lo, high=hi, shape=(2 * NUM_ROBOTS,), dtype=jnp.float32)
 
     def observation_space(self, params: EnvParams) -> spaces.Box:
-        obs_dim = NUM_ROBOTS * 21 + NUM_TASKS * 4 + 2
+        obs_dim = NUM_ROBOTS * 22 + NUM_TASKS * 4 + 2 + 2 * NUM_ROBOTS
         return spaces.Box(low=-jnp.inf, high=jnp.inf, shape=(obs_dim,), dtype=jnp.float32)

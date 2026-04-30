@@ -53,17 +53,18 @@ The environment follows the **Gymnax decoupled API**: all state is carried expli
 
 ## Observation space
 
-The observation is a flat float32 vector of length `N_robots × 21 + N_tasks × 4 + 2`.
+The observation is a flat float32 vector of length `N_robots × 22 + N_tasks × 4 + 2 + 2 × N_robots`.
 
-For the default configuration (2 robots, 2 tasks) this gives **52 features**.
+For the default configuration (2 robots, 2 tasks) this gives **58 features**.
 
-### Robot block — 21 features per robot (ordered by robot index)
+### Robot block — 22 features per robot (ordered by robot index)
 
 | Feature | Description |
 |---------|-------------|
 | `x` | World x-position (meters) |
 | `y` | World y-position (meters) |
-| `theta` | Heading angle (radians, −π to π) |
+| `sin_theta` | Sine of heading angle — smooth, bounded heading encoding |
+| `cos_theta` | Cosine of heading angle — eliminates the ±π discontinuity of raw `theta` |
 | `alive` | 1.0 if robot is alive, 0.0 if destroyed |
 | `carrying` | 1.0 if the robot is carrying a task item, 0.0 otherwise |
 | `task_d` | Euclidean distance to the nearest pending task (meters) |
@@ -101,6 +102,10 @@ The top-3 fire and obstacle sensors replace the raw fire grid used in the Gymnas
 | `global_safety_indicator` | 1.0 at episode start; flips permanently to 0.0 on the first robot death |
 | `global_task_indicator` | 0.0=no task touched, 1.0=at least one picked up, 2.0=at least one delivered |
 
+### Action history — 2 × N_robots scalars
+
+The previous joint action `[v₁, ω₁, ..., vₙ, ωₙ]` is appended verbatim from `EnvState.prev_joint_action`. This lets the policy directly observe the motion it is being penalised for (smoothness, jerk, direction flips) rather than having to infer it implicitly from reward shaping alone.
+
 ---
 
 ## Reward components
@@ -128,20 +133,14 @@ All components are summed each step. Key weights are configurable via `EnvParams
 **1. Egocentric (robot-relative) coordinates**
 The current observation uses absolute world coordinates for robot and task positions. Switching to positions expressed relative to each robot's own pose improves generalisation across spawn locations and reduces what the policy must learn implicitly.
 
-**2. sin/cos heading encoding**
-The raw heading angle `theta` has a discontinuity at ±π. Replacing it with `(sin(theta), cos(theta))` eliminates this discontinuity and gives a smooth, bounded representation that neural networks handle better.
-
-**3. Explicit inter-robot relative positions**
+**2. Explicit inter-robot relative positions**
 Each robot's observation currently lacks direct information about where the other robot is relative to itself. Adding the relative position and heading of each teammate makes collision avoidance and coordination significantly easier to learn.
 
-**4. Per-task fire risk**
+**3. Per-task fire risk**
 Include for each task the distance from the task to the nearest burning cell. This lets the policy prioritise rescuing tasks that are about to be contaminated without requiring any manual priority logic.
 
-**5. Normalised positions**
+**4. Normalised positions**
 All distances and coordinates should be normalised by the workspace dimensions or a fixed scale factor to keep inputs in a consistent range (e.g., [−1, 1]). This avoids gradient scaling issues and makes the policy more robust to arena size changes.
-
-**6. Action history (current gap)**
-`prev_joint_action` and `prev_prev_joint_action` are stored in `EnvState` and used to compute the smoothness, jerk, and direction-flip penalties — but they are never included in the observation vector. This means the policy is penalised for motion it cannot observe. The fix is to append the previous joint action `[v₁, ω₁, v₂, ω₂]` (and optionally the step before that) to the observation in `get_obs()`, and update `observation_space()` accordingly. Without this, the agent can only learn smoothness implicitly through reward shaping, which is much slower and less reliable.
 
 ---
 
