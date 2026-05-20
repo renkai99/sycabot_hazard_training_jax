@@ -10,8 +10,8 @@ gymnax==0.0.9
 
 # Numerics / plotting
 numpy==2.4.4
-scipy==1.17.1
 matplotlib==3.10.9
+pillow>=10.0          # matplotlib.animation.PillowWriter (GIF fallback for --video)
 
 # Experiment tracking
 wandb>=0.17

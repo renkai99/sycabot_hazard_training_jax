@@ -10,7 +10,9 @@ Pure-JAX PPO implementation of the multi-robot hazard-aware rescue environment. 
 | Neural network | Flax Linen |
 | Optimiser | Optax |
 | Environment base class | Gymnax |
+| Experiment tracking | Weights & Biases (`wandb`) |
 | Rendering (optional) | Pygame |
+| Video export (optional) | ffmpeg (MP4) or Pillow (GIF) |
 
 ---
 
@@ -32,9 +34,14 @@ pip install -r requirements.txt
 
 # Rendering support (optional)
 pip install pygame
+
+# MP4 video export (optional — GIF via Pillow works without this)
+# Install ffmpeg via your system package manager, e.g.:
+#   sudo apt install ffmpeg        # Debian / Ubuntu
+#   brew install ffmpeg            # macOS
 ```
 
-`requirements.txt` includes: `jax`, `jaxlib`, `flax`, `optax`, `chex`, `gymnax`, `numpy`, `scipy`, `matplotlib`, `tqdm`
+`requirements.txt` includes: `jax`, `jaxlib`, `flax`, `optax`, `chex`, `gymnax`, `numpy`, `matplotlib`, `pillow`, `wandb`, `tqdm`
 
 ---
 
@@ -260,18 +267,59 @@ python3 train_ppo.py --warm-start
 **Warm-start from a specific checkpoint:**
 
 ```bash
-python3 train_ppo.py --init-params results/<run_name>/trained_params.pkl
+python3 train_ppo.py --init-params results/<run_name>/checkpoint_0110000.pkl
 ```
 
 Results are saved automatically to `results/<run_name>/`:
 
 ```
-results/PPO_hazard_jax_lr0.0003_envs1024_steps64_mb32768_<timestamp>/
-├── hyperparameters.txt      # full config snapshot
-├── trained_params.pkl       # Flax serialised parameters
-├── training_metrics.png     # return, safety, alive robots, deliveries, …
-└── reward_components.png    # pickup, delivery, progress, contamination
+results/PPO_hazard_jax_r2t2_lr0.0001_envs1024_steps128_mb32768_<timestamp>/
+├── hyperparameters.txt           # full config snapshot
+├── best_params.pkl               # best policy seen during training
+├── trained_params.pkl            # final policy at end of training
+├── checkpoint_<step>.pkl         # periodic checkpoints (every CHECKPOINT_INTERVAL steps)
+└── training_metrics.png          # return, safety, alive robots, deliveries, …
 ```
+
+Training is also logged in real-time to [Weights & Biases](https://wandb.ai). Set `WANDB_API_KEY` in your environment or run `wandb login` before training.
+
+---
+
+## Test and visualise
+
+**Run episodes with real-time pygame rendering:**
+
+```bash
+python3 test_and_visualize.py --render --episodes 5
+```
+
+**Save trajectory and fire-spread plots (no display needed):**
+
+```bash
+python3 test_and_visualize.py --plot --episodes 10
+```
+
+**Save a single video of all episodes (MP4 if ffmpeg installed, otherwise GIF):**
+
+```bash
+python3 test_and_visualize.py --video --episodes 5
+```
+
+**Load a specific checkpoint for testing:**
+
+```bash
+python3 test_and_visualize.py --params results/<run_name>/checkpoint_0110000.pkl --render
+```
+
+**Use the deterministic policy mean (no sampling noise):**
+
+```bash
+python3 test_and_visualize.py --deterministic --plot --episodes 20
+```
+
+Output files are written to `test_results/` by default (override with `--out-dir`).
+
+---
 
 **Render a trained policy** using `SycaBotRendererJAX` from [sycabot_render_jax.py](sycabot_render_jax.py):
 
