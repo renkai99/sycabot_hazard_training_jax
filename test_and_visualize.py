@@ -5,6 +5,7 @@ Modes
 --render          Real-time pygame rendering of N episodes.
 --plot            Trajectory + metrics plots saved to PNG (no display needed).
 --both            Both of the above (default).
+--video           Save all episodes as a single video (MP4 or GIF fallback).
 
 Usage examples
 --------------
@@ -12,6 +13,7 @@ Usage examples
     python test_and_visualize.py --params results/.../trained_params.pkl
     python test_and_visualize.py --render --episodes 5
     python test_and_visualize.py --plot   --episodes 20
+    python test_and_visualize.py --video  --episodes 5    # save episodes.mp4
     python test_and_visualize.py --deterministic           # use policy mean
 """
 
@@ -31,6 +33,9 @@ from matplotlib.collections import LineCollection
 from flax import serialization
 
 from sycabot_env_jax import SycaBotEnvJAX, EnvParams, GRID_X, GRID_Y, _X_MIN, _Y_MIN, _CELL_SIZE
+
+# One distinct colour per robot slot; extend if NUM_ROBOTS ever exceeds 6.
+_ROBOT_PALETTE = ["royalblue", "darkorange", "forestgreen", "crimson", "orchid", "sienna"]
 from train_ppo import ActorCritic, config as train_config
 
 
@@ -51,8 +56,10 @@ def parse_args():
     parser.add_argument("--both",         action="store_true")
     parser.add_argument("--deterministic", action="store_true",
                         help="Use policy mean instead of sampling")
+    parser.add_argument("--video",        action="store_true",
+                        help="Save all episodes as a single video file (MP4 or GIF)")
     parser.add_argument("--fps",          type=int,  default=15,
-                        help="Rendering FPS")
+                        help="Rendering / video FPS")
     parser.add_argument("--seed",         type=int,  default=0)
     parser.add_argument("--out-dir",      type=str,  default="test_results",
                         help="Directory for saved plots")
@@ -64,12 +71,16 @@ def parse_args():
 # ========================================================================== #
 
 def find_newest_params():
-    candidates = glob.glob("results/**/trained_params.pkl", recursive=True) + \
-                 glob.glob("trained_params.pkl")
-    if not candidates:
-        sys.exit("No trained_params.pkl found.  Run train_ppo.py first, "
-                 "or pass --params <path>.")
-    return max(candidates, key=os.path.getmtime)
+    best = glob.glob("results/**/best_params.pkl", recursive=True) + \
+           glob.glob("best_params.pkl")
+    if best:
+        return max(best, key=os.path.getmtime)
+    fallback = glob.glob("results/**/trained_params.pkl", recursive=True) + \
+               glob.glob("trained_params.pkl")
+    if fallback:
+        print("Warning: no best_params.pkl found, falling back to trained_params.pkl")
+        return max(fallback, key=os.path.getmtime)
+    sys.exit("No params file found.  Run train_ppo.py first, or pass --params <path>.")
 
 
 def load_params(path, network, obs_dim):
@@ -201,46 +212,38 @@ def plot_trajectory(history, env, env_params, episode_idx: int, out_dir: str):
                     markersize=14, zorder=6, label=f"Task {i}" if i == 0 else None)
 
     # Robot trajectories
-    ROBOT_COLORS = ["royalblue", "darkorange"]
     positions = np.stack(history["pos"])          # (T, NUM_ROBOTS, 2)
     alive_arr = np.stack(history["alive"])        # (T, NUM_ROBOTS)
+    n_robots  = positions.shape[1]
 
-    for r in range(positions.shape[1]):
+    for r in range(n_robots):
+        rc = _ROBOT_PALETTE[r]
         xy = positions[:, r, :]                   # (T, 2)
         alive_mask = alive_arr[:, r] > 0.5        # (T,)
 
-        # Colour segments by carrying state
-        carry_arr = np.stack(history["carrying"])[:, r]  # (T,)
-
-        # Draw path as line segments coloured by carrying
-        segments = np.stack([xy[:-1], xy[1:]], axis=1)   # (T-1, 2, 2)
-        seg_carry = carry_arr[:-1] > 0.5
+        carry_arr  = np.stack(history["carrying"])[:, r]  # (T,)
+        segments   = np.stack([xy[:-1], xy[1:]], axis=1)  # (T-1, 2, 2)
+        seg_carry  = carry_arr[:-1] > 0.5
         alive_segs = alive_mask[:-1]
-        col_carry  = np.where(seg_carry, 0.9, 0.3)       # value for cmap
-        colors = [ROBOT_COLORS[r]] * len(segments)
 
-        # Alive segments only
         for t in range(len(segments)):
             if not alive_segs[t]:
                 continue
             ls = "--" if seg_carry[t] else "-"
             ax_map.plot(segments[t, :, 0], segments[t, :, 1],
-                        color=ROBOT_COLORS[r], linewidth=1.5, linestyle=ls, alpha=0.7)
+                        color=rc, linewidth=1.5, linestyle=ls, alpha=0.7)
 
-        # Start marker
-        ax_map.plot(xy[0, 0], xy[0, 1], "o", color=ROBOT_COLORS[r],
-                    markersize=10, zorder=7, label=f"Robot {r} start")
-        # End marker (X if dead)
+        ax_map.plot(xy[0, 0], xy[0, 1], "o", color=rc, markersize=10, zorder=7)
         last_alive = alive_arr[-1, r] > 0.5
         ax_map.plot(xy[-1, 0], xy[-1, 1],
                     "o" if last_alive else "x",
-                    color=ROBOT_COLORS[r], markersize=10, zorder=7,
-                    markeredgewidth=2)
+                    color=rc, markersize=10, zorder=7, markeredgewidth=2)
 
-    # Legend
+    # Legend — built dynamically from actual robot count
     legend_handles = [
-        mpatches.Patch(color="royalblue",    label="Robot 0"),
-        mpatches.Patch(color="darkorange",   label="Robot 1"),
+        mpatches.Patch(color=_ROBOT_PALETTE[r], label=f"Robot {r}")
+        for r in range(n_robots)
+    ] + [
         mpatches.Patch(color="mediumpurple", label="Task (initial)"),
         mpatches.Patch(color="limegreen",    label="Exit"),
         mpatches.Patch(color="orangered",    alpha=0.5, label="Fire (final)"),
@@ -320,10 +323,9 @@ def plot_fire_spread(history, env, env_params, episode_idx: int, out_dir: str,
 
         pos = history["pos"][fi]
         alive = history["alive"][fi]
-        COLORS = ["royalblue", "darkorange"]
         for r in range(pos.shape[0]):
             if alive[r] > 0.5:
-                ax.plot(pos[r, 0], pos[r, 1], "o", color=COLORS[r], markersize=6, zorder=5)
+                ax.plot(pos[r, 0], pos[r, 1], "o", color=_ROBOT_PALETTE[r], markersize=6, zorder=5)
 
     plt.tight_layout()
     save_path = os.path.join(out_dir, f"fire_spread_{episode_idx + 1:03d}.png")
@@ -375,6 +377,122 @@ def plot_summary(all_histories, out_dir: str):
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"\nSaved summary plot → {save_path}")
+
+
+# ========================================================================== #
+#  Video export                                                               #
+# ========================================================================== #
+
+_TASK_STATUS_COLOR = {0: "mediumpurple", 1: "gold", 2: "limegreen", 3: "gray"}
+_TRAIL_LEN = 30   # steps of position trail shown behind each robot
+
+
+def save_video(all_histories, env, env_params, out_dir: str, fps: int = 15):
+    """Render all episodes into a single MP4 (falls back to GIF if ffmpeg absent)."""
+    import matplotlib.animation as animation
+
+    obs_start = np.array(env.obs_start)
+    obs_end   = np.array(env.obs_end)
+    exits     = np.array(env.exits)
+    params    = env_params
+
+    # Build flat frame list: (episode_index, step_within_episode)
+    frame_index = []
+    for ep_idx, history in enumerate(all_histories):
+        for t in range(history["length"]):
+            frame_index.append((ep_idx, t))
+
+    # Pre-stack position arrays per episode for fast trail rendering
+    pos_stacked = [np.stack(h["pos"]) for h in all_histories]  # list of (T, N, 2)
+
+    fig, ax = plt.subplots(figsize=(5, 10))
+    fig.subplots_adjust(left=0.08, right=0.97, top=0.95, bottom=0.03)
+
+    def draw_frame(idx):
+        ep_idx, t = frame_index[idx]
+        history   = all_histories[ep_idx]
+        pos_arr   = pos_stacked[ep_idx]        # (T, N, 2)
+
+        ax.clear()
+        ax.set_aspect("equal")
+        ax.set_xlim(params.x_min - 0.05, params.x_max + 0.05)
+        ax.set_ylim(params.y_min - 0.05, params.y_max + 0.05)
+        ax.set_facecolor("#f5f5f5")
+        ax.set_title(
+            f"Ep {ep_idx + 1}/{len(all_histories)}  "
+            f"step {t + 1}/{history['length']}  "
+            f"return={history['total_reward']:.1f}",
+            fontsize=9,
+        )
+
+        # Obstacles
+        for s, e in zip(obs_start, obs_end):
+            ax.plot([s[0], e[0]], [s[1], e[1]], "k-", linewidth=2.5)
+
+        # Exits
+        for ex in exits:
+            ax.plot(ex[0], ex[1], "^", color="limegreen", markersize=10, zorder=5)
+
+        # Fire grid
+        fg = history["fire_grid"][t]
+        for gx in range(GRID_X):
+            for gy in range(GRID_Y):
+                if fg[gx, gy] > 0:
+                    cx = _X_MIN + (gx + 0.5) * _CELL_SIZE
+                    cy = _Y_MIN + (gy + 0.5) * _CELL_SIZE
+                    ax.add_patch(plt.Rectangle(
+                        (cx - _CELL_SIZE / 2, cy - _CELL_SIZE / 2),
+                        _CELL_SIZE, _CELL_SIZE,
+                        color="orangered", alpha=0.5, zorder=1))
+
+        # Tasks
+        for tp, ts in zip(history["task_pos"][t], history["task_status"][t]):
+            color = _TASK_STATUS_COLOR.get(int(ts), "mediumpurple")
+            ax.plot(tp[0], tp[1], "*", color=color, markersize=13, zorder=6)
+
+        # Robots — dot + short trail
+        n_robots = pos_arr.shape[1]
+        for r in range(n_robots):
+            rc    = _ROBOT_PALETTE[r]
+            alive = history["alive"][t][r] > 0.5
+            rx, ry = pos_arr[t, r]
+
+            t0 = max(0, t - _TRAIL_LEN)
+            ax.plot(pos_arr[t0:t + 1, r, 0], pos_arr[t0:t + 1, r, 1],
+                    "-", color=rc, alpha=0.35, linewidth=1.5, zorder=4)
+
+            if alive:
+                carrying = history["carrying"][t][r] > 0.5
+                marker   = "D" if carrying else "o"
+                ax.plot(rx, ry, marker, color=rc, markersize=9, zorder=7)
+            else:
+                ax.plot(rx, ry, "x", color=rc, markersize=9,
+                        markeredgewidth=2, zorder=7)
+
+    total_frames = len(frame_index)
+    print(f"\nRendering video: {total_frames} frames across "
+          f"{len(all_histories)} episode(s)...")
+
+    anim = animation.FuncAnimation(
+        fig, draw_frame, frames=total_frames, interval=1000 // fps, blit=False
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    mp4_path = os.path.join(out_dir, "episodes.mp4")
+    gif_path = os.path.join(out_dir, "episodes.gif")
+
+    try:
+        writer = animation.FFMpegWriter(fps=fps, bitrate=1800,
+                                        extra_args=["-pix_fmt", "yuv420p"])
+        anim.save(mp4_path, writer=writer, dpi=100)
+        print(f"Saved video → {mp4_path}")
+    except Exception as exc:
+        print(f"ffmpeg unavailable ({exc}); saving as GIF instead...")
+        writer = animation.PillowWriter(fps=fps)
+        anim.save(gif_path, writer=writer, dpi=80)
+        print(f"Saved video → {gif_path}")
+
+    plt.close(fig)
 
 
 # ========================================================================== #
@@ -455,6 +573,9 @@ def main():
 
     if do_plot:
         plot_summary(all_histories, args.out_dir)
+
+    if args.video:
+        save_video(all_histories, env, env_params, args.out_dir, fps=args.fps)
 
     # Print aggregate stats
     print("\n=== Aggregate Stats ===")

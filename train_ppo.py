@@ -9,16 +9,16 @@ from datetime import datetime
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-import numpy as np
+import numpy as np  # noqa: F401  (kept for orthogonal/constant init helpers)
 import optax
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from flax import serialization
 from typing import Sequence, NamedTuple, Any
 from tqdm import tqdm
-import matplotlib.pyplot as plt
+import wandb
 
-from sycabot_env_jax import SycaBotEnvJAX, EnvParams
+from sycabot_env_jax import SycaBotEnvJAX, EnvParams, NUM_ROBOTS, NUM_TASKS
 from wrappers import LogWrapper, VecEnv
 
 # ========================================================================== #
@@ -35,9 +35,9 @@ config = {
     "GAMMA": 0.99,
     "GAE_LAMBDA": 0.95,
     "CLIP_EPS": 0.2,
-    "ENT_COEF": 0.01,
+    "ENT_COEF":0.01,
     "VF_COEF": 0.5,
-    "MAX_GRAD_NORM": 0.5,
+    "MAX_GRAD_NORM": 0.5,   
     "CLIP_VF": True,
     "KL_THRESHOLD": 0.015,
     # Rollout
@@ -50,6 +50,7 @@ config = {
     # Misc
     "SEED": 42,
     "PRINT_INTERVAL": 1000,
+    "CHECKPOINT_INTERVAL": 10000,   # save params every N updates; 0 = disabled
 }
 
 config["NUM_MINIBATCHES"] = (config["NUM_ENVS"] * config["NUM_STEPS"]) // config["MINIBATCH_SIZE"]
@@ -144,7 +145,7 @@ class Transition(NamedTuple):
 #  TRAINING FUNCTION                                                          #
 # ========================================================================== #
 
-def make_train(config, init_params=None):
+def make_train(config, init_params=None, save_dir=None):
     env_base   = SycaBotEnvJAX()
     env_params = EnvParams()
     env        = VecEnv(LogWrapper(env_base))
@@ -294,38 +295,51 @@ def make_train(config, init_params=None):
 
         runner_state = (train_state, env_state, obsv, rng)
         all_metrics  = []
+        best_return  = -float("inf")
+
+        ckpt_interval = config.get("CHECKPOINT_INTERVAL", 0)
 
         for step in tqdm(range(total_updates), desc="PPO Updates"):
             runner_state, traj = _update_step(runner_state, step)
 
-            if (step + 1) % config["PRINT_INTERVAL"] == 0:
-                tb  = jax.device_get(traj)
-                inf = jax.device_get(traj.info)
-
-                ep_ret = inf["returned_episode_returns"][inf["returned_episode"]]
-                avg_ep = float(ep_ret.mean()) if ep_ret.size > 0 else 0.0
-
-                print(f"\n[Step {step+1}/{total_updates}]  "
-                      f"avg_ep_return={avg_ep:.1f}  "
-                      f"alive={inf['alive_robots'].mean():.2f}  "
-                      f"delivered={inf['delivered_tasks'].mean():.3f}  "
-                      f"contaminated={inf['contaminated_tasks'].mean():.3f}  "
-                      f"safety={inf['safety_indicator'].mean():.3f}")
-
             inf_cpu = jax.device_get(traj.info)
             ep_rets = inf_cpu["returned_episode_returns"][inf_cpu["returned_episode"]]
-            all_metrics.append({
-                "step":              step,
-                "avg_return":        float(ep_rets.mean()) if ep_rets.size > 0 else 0.0,
-                "safety":            float(inf_cpu["safety_indicator"].mean()),
-                "alive":             float(inf_cpu["alive_robots"].mean()),
-                "delivered":         float(inf_cpu["delivered_tasks"].mean()),
-                "contaminated":      float(inf_cpu["contaminated_tasks"].mean()),
-                "reward_progress":   float(inf_cpu["reward_progress"].mean()),
-                "reward_pickup":     float(inf_cpu["reward_pickup"].mean()),
-                "reward_delivery":   float(inf_cpu["reward_delivery"].mean()),
-                "smooth_penalty":    float(inf_cpu["smooth_penalty"].mean()),
-            })
+            avg_ep  = float(ep_rets.mean()) if ep_rets.size > 0 else 0.0
+
+            if (step + 1) % config["PRINT_INTERVAL"] == 0:
+                print(f"\n[Step {step+1}/{total_updates}]  "
+                      f"avg_ep_return={avg_ep:.1f}  "
+                      f"alive={inf_cpu['alive_robots'].mean():.2f}  "
+                      f"delivered={inf_cpu['delivered_tasks'].mean():.3f}  "
+                      f"contaminated={inf_cpu['contaminated_tasks'].mean():.3f}  "
+                      f"safety={inf_cpu['safety_indicator'].mean():.3f}")
+
+            metrics = {
+                "charts/avg_episode_return": avg_ep,
+                "charts/safety_indicator":   float(inf_cpu["safety_indicator"].mean()),
+                "charts/alive_robots":       float(inf_cpu["alive_robots"].mean()),
+                "charts/delivered_tasks":    float(inf_cpu["delivered_tasks"].mean()),
+                "charts/contaminated_tasks": float(inf_cpu["contaminated_tasks"].mean()),
+                "rewards/progress":          float(inf_cpu["reward_progress"].mean()),
+                "rewards/pickup":            float(inf_cpu["reward_pickup"].mean()),
+                "rewards/delivery":          float(inf_cpu["reward_delivery"].mean()),
+                "rewards/smooth_penalty":    float(inf_cpu["smooth_penalty"].mean()),
+                "rewards/proximity_penalty": float(inf_cpu["proximity_penalty"].mean()),
+            }
+            wandb.log(metrics, step=step)
+            all_metrics.append({"step": step, **metrics})
+
+            # --- Checkpoint: periodic and best-return --- #
+            current_params = jax.device_get(runner_state[0]).params
+            if ckpt_interval > 0 and (step + 1) % ckpt_interval == 0:
+                ckpt_path = os.path.join(save_dir, f"checkpoint_{step+1:07d}.pkl")
+                with open(ckpt_path, "wb") as f:
+                    f.write(serialization.to_bytes(current_params))
+            if avg_ep > best_return:
+                best_return = avg_ep
+                best_path = os.path.join(save_dir, "best_params.pkl")
+                with open(best_path, "wb") as f:
+                    f.write(serialization.to_bytes(current_params))
 
         return {"runner_state": runner_state, "metrics": all_metrics}
 
@@ -337,11 +351,16 @@ def make_train(config, init_params=None):
 # ========================================================================== #
 
 def _find_newest_params():
-    candidates = glob.glob("results/**/trained_params.pkl", recursive=True) + \
-                 glob.glob("trained_params.pkl")
-    if not candidates:
-        raise FileNotFoundError("No trained_params.pkl found under results/")
-    return max(candidates, key=os.path.getmtime)
+    best = glob.glob("results/**/best_params.pkl", recursive=True) + \
+           glob.glob("best_params.pkl")
+    if best:
+        return max(best, key=os.path.getmtime)
+    fallback = glob.glob("results/**/trained_params.pkl", recursive=True) + \
+               glob.glob("trained_params.pkl")
+    if fallback:
+        print("Warning: no best_params.pkl found, falling back to trained_params.pkl")
+        return max(fallback, key=os.path.getmtime)
+    raise FileNotFoundError("No params file found under results/")
 
 
 def _load_params(path, network, obs_dim):
@@ -377,6 +396,7 @@ if __name__ == "__main__":
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name  = (f"PPO_hazard_jax"
+                 f"_r{NUM_ROBOTS}t{NUM_TASKS}"
                  f"_lr{config['LR']}"
                  f"_envs{config['NUM_ENVS']}"
                  f"_steps{config['NUM_STEPS']}"
@@ -392,56 +412,23 @@ if __name__ == "__main__":
         for k, v in config.items():
             f.write(f"{k}: {v}\n")
 
-    train_fn = make_train(config, init_params=init_params)
+    wandb.init(
+        project="sycabot-hazard",
+        name=run_name,
+        config={**config, "num_robots": NUM_ROBOTS, "num_tasks": NUM_TASKS},
+        dir=save_dir,
+    )
+
+    train_fn = make_train(config, init_params=init_params, save_dir=save_dir)
     print(f"Starting training  |  {jax.device_count()} device(s): {jax.devices()}")
     out = train_fn(rng)
+    wandb.finish()
 
-    # ---- Save params ---- #
+    # ---- Save final params ---- #
     final_runner = jax.device_get(out["runner_state"])
     trained_params = final_runner[0].params
     params_path    = os.path.join(save_dir, "trained_params.pkl")
     with open(params_path, "wb") as f:
         f.write(serialization.to_bytes(trained_params))
     print(f"Saved trained parameters → {params_path}")
-
-    # ---- Plots ---- #
-    metrics = out["metrics"]
-    steps   = [m["step"] for m in metrics]
-
-    fig, axs = plt.subplots(3, 2, figsize=(16, 14), sharex=True)
-    fig.suptitle(f"Training Metrics – {run_name}", fontsize=13)
-
-    def _plot(ax, key, label, color):
-        vals = np.array([m[key] for m in metrics])
-        ax.plot(steps, vals, color=color, linewidth=1.5, label=label)
-        ax.set_ylabel(label); ax.legend(); ax.grid(True)
-
-    _plot(axs[0, 0], "avg_return",      "Avg Episode Return",       "steelblue")
-    _plot(axs[0, 1], "safety",          "Safety Indicator",         "green")
-    _plot(axs[1, 0], "alive",           "Avg Alive Robots",         "darkorange")
-    _plot(axs[1, 1], "delivered",       "Delivered Tasks",          "purple")
-    _plot(axs[2, 0], "reward_progress", "Progress Reward",          "royalblue")
-    _plot(axs[2, 1], "smooth_penalty",  "Smoothness Penalty",       "red")
-
-    axs[2, 0].set_xlabel("PPO Update Step")
-    axs[2, 1].set_xlabel("PPO Update Step")
-
-    plt.tight_layout()
-    plot_path = os.path.join(save_dir, "training_metrics.png")
-    plt.savefig(plot_path, dpi=150)
-    print(f"Saved training plot  → {plot_path}")
-
-    # Reward components subplot
-    fig2, axs2 = plt.subplots(2, 2, figsize=(16, 10), sharex=True)
-    fig2.suptitle("Reward Components", fontsize=13)
-    _plot2 = lambda ax, k, l, c: (_plot(ax, k, l, c), ax.set_xlabel("Step"))
-    _plot(axs2[0, 0], "reward_pickup",   "Pickup Reward",    "darkorange")
-    _plot(axs2[0, 1], "reward_delivery", "Delivery Reward",  "forestgreen")
-    _plot(axs2[1, 0], "reward_progress", "Progress Reward",  "royalblue")
-    _plot(axs2[1, 1], "contaminated",    "Contaminated Tasks", "firebrick")
-    for ax in axs2[1]:
-        ax.set_xlabel("PPO Update Step")
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "reward_components.png"), dpi=150)
-
     print(f"\nAll outputs saved in: {save_dir}")

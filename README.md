@@ -118,7 +118,8 @@ All components are summed each step. Key weights are configurable via `EnvParams
 | **Delivery reward** | `+delivery_reward × deliveries_this_step` | 600 | Sparse; triggers when a carrying robot enters ≤0.20 m of an exit |
 | **Task progress** | `+weight × Σ max(prev_visible_task_dist − curr_visible_task_dist, 0)` | 30 | Potential-based shaping; only counts when task has line-of-sight; resets when visibility is lost |
 | **Exit progress** | `+weight × Σ max(prev_visible_exit_dist − curr_visible_exit_dist, 0)` | 30 | Identical logic, but for carrying robots approaching exits |
-| **Safety event penalty** | `−3.0 × safety_events` | fixed | Counts every robot death in the step |
+| **Death penalty** | `−death_penalty × safety_events` | 50 | Per-robot penalty each time a robot dies; large relative to task rewards to discourage sacrificing robots |
+| **Survival bonus** | `+survival_reward_weight × Σ alive_robots` | 0.05 | Per-step reward for each alive robot; accumulates over the episode so early deaths are increasingly costly |
 | **Action smoothness penalty** | `−smooth_action_weight × mean(Δv²)` | 1.00 | Penalises abrupt linear velocity changes |
 | **Turn smoothness penalty** | `−turn_smooth_weight × mean(Δω²)` | 0.20 | Penalises abrupt angular velocity changes |
 | **Jerk penalty** | `−jerk_weight × mean(jerk²)` | 0.08 | Second-order finite difference of actions |
@@ -152,13 +153,10 @@ The current fire penalty is purely stochastic (kill probability near fire cells)
 **2. Contamination prevention bonus**
 Give a small positive reward when a robot picks up a task that is within a threshold distance of an active fire cell. This rewards urgency and teaches the agent to prioritise at-risk items.
 
-**3. Survival-per-step bonus**
-A small per-step reward (+0.01 to +0.05) for each alive robot counters the tendency to sacrifice robots when expedient, and balances the time-step penalty.
-
-**4. Collision proximity shaping**
+**3. Collision proximity shaping**
 Rather than only penalising actual deaths, add a potential-based penalty for inter-robot distance below a soft threshold (e.g., `−k × max(0, collision_distance × 2 − dist)²`). This creates a repulsive field that guides the policy away from near-collisions before they become fatal.
 
-**5. Fire-weighted task progress**
+**4. Fire-weighted task progress**
 Weight the task progress reward by the urgency of the targeted task: tasks closer to fire get a higher progress multiplier. This guides robots to rescue at-risk tasks first without requiring any additional manual priority logic.
 
 ---
@@ -181,6 +179,8 @@ All parameters live in `EnvParams` and can be overridden at construction time.
 | `delivery_reward` | 600 | Reward for delivering a task item to an exit |
 | `task_progress_reward_weight` | 30 | Weight for move-to-task shaping reward |
 | `exit_progress_reward_weight` | 30 | Weight for move-to-exit shaping reward (when carrying) |
+| `death_penalty` | 50 | Per-robot penalty on each death event |
+| `survival_reward_weight` | 0.05 | Per-step reward per alive robot |
 | `smooth_action_weight` | 1.00 | Weight for linear velocity smoothness penalty |
 | `turn_smooth_weight` | 0.20 | Weight for angular velocity smoothness penalty |
 | `jerk_weight` | 0.08 | Weight for jerk penalty |

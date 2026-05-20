@@ -54,14 +54,22 @@ class EnvParams:
     fire_spread_prob: float = 0.020
     fire_kill_prob: float = 0.2
     fire_cell_size: float = _CELL_SIZE
-    pickup_reward: float = 600.0
-    delivery_reward: float = 600.0
-    smooth_action_weight: float = 1.0
-    turn_smooth_weight: float = 0.20
-    jerk_weight: float = 0.08
-    direction_flip_weight: float = 0.10
-    task_progress_reward_weight: float = 30.0
-    exit_progress_reward_weight: float = 30.0
+    pickup_reward: float = 6.0
+    delivery_reward: float = 8.0
+    smooth_action_weight: float = 0.006
+    turn_smooth_weight: float = 0.001
+    jerk_weight: float = 0.0005 
+    direction_flip_weight: float = 0.007
+    task_progress_reward_weight: float = 0.3
+    exit_progress_reward_weight: float = 0.3
+    death_penalty: float = 0.3
+    cooperation_bonus_weight: float = 0.0
+    all_fail_penalty: float = 1.0
+    survival_reward_weight: float = 0.0
+    obstacle_proximity_weight: float = 0.0
+    obstacle_proximity_threshold: float = 0.20
+    fire_proximity_weight: float = 0.0
+    fire_proximity_threshold: float = 0.20
     max_steps: int = 1000
     pickup_radius: float = 0.18
     delivery_radius: float = 0.20
@@ -107,19 +115,33 @@ class SycaBotEnvJAX(environment.Environment):
                         break
         self.non_obstacle_mask = jnp.array(mask, dtype=jnp.float32)
 
-        # Valid robot spawn positions – dense grid of jitter offsets around each exit,
-        # filtered for obstacle clearance.  Replaces the while_loop in _sample_near_exit.
+        # Valid robot spawn positions – per-exit lookup table so robots can be
+        # assigned to distinct exits, preventing same-exit spawns that cause
+        # immediate mutual-collision deaths.
+        # Shape: (NUM_EXITS, K_max, 2), padded by repeating the first position.
+        assert NUM_ROBOTS <= NUM_EXITS, "Need at least one exit per robot"
         jitter = np.linspace(-0.12, 0.12, 15)   # 15×15 = 225 candidates per exit
-        robot_spawns = []
+        spawns_per_exit = []
         for ex in exits_np:
+            pts = []
             for dx in jitter:
                 for dy in jitter:
                     pt = ex + np.array([dx, dy])
                     if not (_X_MIN <= pt[0] <= _X_MAX and _Y_MIN <= pt[1] <= _Y_MAX):
                         continue
                     if _min_obs_dist_np(pt) >= r * 2.0:
-                        robot_spawns.append(pt.copy())
-        self.valid_robot_spawns = jnp.array(robot_spawns, dtype=jnp.float32)  # (N, 2)
+                        pts.append(pt.copy())
+            spawns_per_exit.append(pts)
+        n_per_exit = [len(pts) for pts in spawns_per_exit]
+        K_max = max(n_per_exit)
+        padded = np.zeros((NUM_EXITS, K_max, 2), dtype=np.float32)
+        for i, pts in enumerate(spawns_per_exit):
+            n = len(pts)
+            padded[i, :n] = pts
+            if n < K_max:                       # repeat first entry to fill padding
+                padded[i, n:] = pts[0]
+        self.robot_spawns_per_exit = jnp.array(padded)                     # (NUM_EXITS, K_max, 2)
+        self.n_spawns_per_exit     = jnp.array(n_per_exit, dtype=jnp.int32)  # (NUM_EXITS,)
 
         # Valid task spawn positions – regular grid across the arena, filtered for
         # obstacle clearance and minimum exit distance.  Replaces _sample_task_pos.
@@ -296,30 +318,35 @@ class SycaBotEnvJAX(environment.Environment):
         return EnvParams()
 
     def reset_env(self, key: chex.PRNGKey, params: EnvParams) -> Tuple[chex.Array, EnvState]:
-        key, k1, k2, k3, k4, k5, k6, kfire = jax.random.split(key, 8)
+        # +1 for exit-permutation key
+        n_keys = 1 + 2 * NUM_ROBOTS + NUM_TASKS + 1  # perm, pos, theta, task, fire
+        all_keys = jax.random.split(key, n_keys)
+        perm_key   = all_keys[0]
+        robot_keys = all_keys[1 : 1 + NUM_ROBOTS]
+        theta_keys = all_keys[1 + NUM_ROBOTS : 1 + 2 * NUM_ROBOTS]
+        task_keys  = all_keys[1 + 2 * NUM_ROBOTS : 1 + 2 * NUM_ROBOTS + NUM_TASKS]
+        kfire      = all_keys[-1]
 
-        # O(1) table lookups – no while_loops, safe to vmap over thousands of envs
-        n_r = self.valid_robot_spawns.shape[0]
+        # Assign each robot a unique exit (no two robots share the same exit)
+        exit_assign = jax.random.permutation(perm_key, NUM_EXITS)[:NUM_ROBOTS]  # (NUM_ROBOTS,)
+
+        def sample_from_exit(exit_idx, spawn_key):
+            n   = self.n_spawns_per_exit[exit_idx]
+            idx = jax.random.randint(spawn_key, (), 0, n)
+            return self.robot_spawns_per_exit[exit_idx, idx]
+
         n_t = self.valid_task_spawns.shape[0]
 
-        pos0   = self.valid_robot_spawns[jax.random.randint(k1, (), 0, n_r)]
-        pos1   = self.valid_robot_spawns[jax.random.randint(k2, (), 0, n_r)]
-        theta0 = jax.random.uniform(k3, minval=-jnp.pi, maxval=jnp.pi)
-        theta1 = jax.random.uniform(k4, minval=-jnp.pi, maxval=jnp.pi)
-
-        robot_pos   = jnp.stack([pos0, pos1])
-        robot_theta = jnp.array([theta0, theta1])
-
-        task0    = self.valid_task_spawns[jax.random.randint(k5, (), 0, n_t)]
-        task1    = self.valid_task_spawns[jax.random.randint(k6, (), 0, n_t)]
-        task_pos = jnp.stack([task0, task1])
+        robot_pos   = jax.vmap(sample_from_exit)(exit_assign, robot_keys)
+        robot_theta = jax.vmap(lambda k: jax.random.uniform(k, minval=-jnp.pi, maxval=jnp.pi))(theta_keys)
+        task_pos    = self.valid_task_spawns[
+            jax.vmap(lambda k: jax.random.randint(k, (), 0, n_t))(task_keys)]
 
         fire_grid = self._spawn_fire(kfire)
         task_status = jnp.zeros(NUM_TASKS, dtype=jnp.int32)
 
-        # Initial visible distances for progress reward baseline
-        pvtd0 = self._nearest_visible_task_dist(pos0, task_pos, task_status)
-        pvtd1 = self._nearest_visible_task_dist(pos1, task_pos, task_status)
+        pvtd = jax.vmap(self._nearest_visible_task_dist, in_axes=(0, None, None))(
+            robot_pos, task_pos, task_status)
 
         state = EnvState(
             robot_pos=robot_pos,
@@ -332,7 +359,7 @@ class SycaBotEnvJAX(environment.Environment):
             task_carrier=jnp.full(NUM_TASKS, -1, dtype=jnp.int32),
             fire_grid=fire_grid,
             global_safety_indicator=1.0,
-            prev_visible_task_dist=jnp.array([pvtd0, pvtd1]),
+            prev_visible_task_dist=pvtd,
             prev_visible_exit_dist=jnp.full(NUM_ROBOTS, jnp.nan),
             prev_joint_action=jnp.zeros(2 * NUM_ROBOTS, dtype=jnp.float32),
             prev_prev_joint_action=jnp.zeros(2 * NUM_ROBOTS, dtype=jnp.float32),
@@ -399,85 +426,80 @@ class SycaBotEnvJAX(environment.Environment):
         self, key: chex.PRNGKey, state: EnvState, action: chex.Array, params: EnvParams
     ) -> Tuple[chex.Array, EnvState, float, bool, dict]:
 
-        key, k_fire, k_fk0, k_fk1 = jax.random.split(key, 4)
+        fire_key, *fk_list = jax.random.split(key, 1 + NUM_ROBOTS)
+        fk_keys = jnp.stack(fk_list)                                    # (NUM_ROBOTS, 2)
         action = jnp.clip(jnp.asarray(action, dtype=jnp.float32),
                           jnp.array([params.v_min, params.w_min] * NUM_ROBOTS),
                           jnp.array([params.v_max, params.w_max] * NUM_ROBOTS))
+        actions_per_robot = action.reshape(NUM_ROBOTS, 2)
 
         # ---- 1. Motion ---- #
         def move(pos, theta, act):
             v, w = act[0], act[1]
-            new_pos = pos + jnp.array([v * jnp.cos(theta), v * jnp.sin(theta)]) * params.dt
+            new_pos   = pos + jnp.array([v * jnp.cos(theta), v * jnp.sin(theta)]) * params.dt
             new_theta = (theta + w * params.dt + jnp.pi) % (2 * jnp.pi) - jnp.pi
             return new_pos, new_theta
 
-        new_pos0, new_theta0 = move(state.robot_pos[0], state.robot_theta[0], action[0:2])
-        new_pos1, new_theta1 = move(state.robot_pos[1], state.robot_theta[1], action[2:4])
-        new_pos0 = jnp.where(state.robot_alive[0] > 0.5, new_pos0, state.robot_pos[0])
-        new_theta0 = jnp.where(state.robot_alive[0] > 0.5, new_theta0, state.robot_theta[0])
-        new_pos1 = jnp.where(state.robot_alive[1] > 0.5, new_pos1, state.robot_pos[1])
-        new_theta1 = jnp.where(state.robot_alive[1] > 0.5, new_theta1, state.robot_theta[1])
-        new_robot_pos = jnp.stack([new_pos0, new_pos1])
-        new_robot_theta = jnp.array([new_theta0, new_theta1])
+        cand_pos, cand_theta = jax.vmap(move)(
+            state.robot_pos, state.robot_theta, actions_per_robot)
+        alive_mask = state.robot_alive > 0.5
+        new_robot_pos   = jnp.where(alive_mask[:, None], cand_pos,   state.robot_pos)
+        new_robot_theta = jnp.where(alive_mask,          cand_theta, state.robot_theta)
 
         # ---- 2. Departed-exit flag ---- #
-        dep0 = jnp.where(self._nearest_exit_dist(new_pos0) > params.exit_departure_radius,
-                         1.0, state.robot_departed_exit[0])
-        dep1 = jnp.where(self._nearest_exit_dist(new_pos1) > params.exit_departure_radius,
-                         1.0, state.robot_departed_exit[1])
-        new_departed = jnp.array([dep0, dep1])
+        new_departed = jax.vmap(
+            lambda p, d: jnp.where(self._nearest_exit_dist(p) > params.exit_departure_radius, 1.0, d)
+        )(new_robot_pos, state.robot_departed_exit)
 
         # ---- 3. Fire propagation ---- #
-        new_fire_grid = self._propagate_fire(k_fire, state.fire_grid, params)
+        new_fire_grid = self._propagate_fire(fire_key, state.fire_grid, params)
 
         # ---- 4. Failure checks ---- #
-        oob0  = ~self._in_bounds(new_pos0, params) & (state.robot_alive[0] > 0.5)
-        oob1  = ~self._in_bounds(new_pos1, params) & (state.robot_alive[1] > 0.5)
-        obs0  = (self._min_obs_dist(new_pos0) < params.robot_radius) & (state.robot_alive[0] > 0.5)
-        obs1  = (self._min_obs_dist(new_pos1) < params.robot_radius) & (state.robot_alive[1] > 0.5)
-        mut   = (jnp.linalg.norm(new_pos0 - new_pos1) < params.collision_distance) & \
-                (state.robot_alive[0] > 0.5) & (state.robot_alive[1] > 0.5)
+        oob = jax.vmap(lambda p, a: ~self._in_bounds(p, params) & (a > 0.5))(
+            new_robot_pos, state.robot_alive)
+        obs_hit = jax.vmap(lambda p, a: (self._min_obs_dist(p) < params.robot_radius) & (a > 0.5))(
+            new_robot_pos, state.robot_alive)
+
+        # Mutual collision: robot i dies if within collision_distance of any other alive robot
+        pair_dists = jnp.linalg.norm(
+            new_robot_pos[:, None, :] - new_robot_pos[None, :, :], axis=-1)   # (N, N)
+        both_alive = (state.robot_alive[:, None] > 0.5) & (state.robot_alive[None, :] > 0.5)
+        not_self   = ~jnp.eye(NUM_ROBOTS, dtype=bool)
+        mut = jnp.any((pair_dists < params.collision_distance) & not_self & both_alive, axis=1)
 
         fire_r = 0.5 * jnp.sqrt(2.0) * params.fire_cell_size + params.robot_radius
-        fk0 = (self._nearest_fire_dist(new_pos0, state.fire_grid) <= fire_r) & \
-              (jax.random.uniform(k_fk0) < params.fire_kill_prob) & (state.robot_alive[0] > 0.5)
-        fk1 = (self._nearest_fire_dist(new_pos1, state.fire_grid) <= fire_r) & \
-              (jax.random.uniform(k_fk1) < params.fire_kill_prob) & (state.robot_alive[1] > 0.5)
+        fk = jax.vmap(lambda p, k, a:
+            (self._nearest_fire_dist(p, state.fire_grid) <= fire_r) &
+            (jax.random.uniform(k) < params.fire_kill_prob) & (a > 0.5)
+        )(new_robot_pos, fk_keys, state.robot_alive)
 
-        dies0 = oob0 | obs0 | mut | fk0
-        dies1 = oob1 | obs1 | mut | fk1
-        new_alive0 = state.robot_alive[0] * (1.0 - dies0.astype(jnp.float32))
-        new_alive1 = state.robot_alive[1] * (1.0 - dies1.astype(jnp.float32))
-        new_alive = jnp.array([new_alive0, new_alive1])
-
-        any_death = dies0 | dies1
-        new_safety = state.global_safety_indicator * (1.0 - any_death.astype(jnp.float32))
-        safety_events = dies0.astype(jnp.float32) + dies1.astype(jnp.float32)
+        dies    = oob | obs_hit | mut | fk
+        new_alive   = state.robot_alive * (1.0 - dies.astype(jnp.float32))
+        any_death   = jnp.any(dies)
+        new_safety  = state.global_safety_indicator * (1.0 - any_death.astype(jnp.float32))
+        safety_events = jnp.sum(dies.astype(jnp.float32))
 
         # ---- 5. Task contamination from fire ---- #
-        def fire_contam(task_idx, ts):
+        def fire_contam_one(task_pos_i, ts_i):
             gx = jnp.clip(
-                ((state.task_pos[task_idx, 0] - params.x_min) / params.fire_cell_size).astype(jnp.int32),
+                ((task_pos_i[0] - params.x_min) / params.fire_cell_size).astype(jnp.int32),
                 0, GRID_X - 1)
             gy = jnp.clip(
-                ((state.task_pos[task_idx, 1] - params.y_min) / params.fire_cell_size).astype(jnp.int32),
+                ((task_pos_i[1] - params.y_min) / params.fire_cell_size).astype(jnp.int32),
                 0, GRID_Y - 1)
-            return (ts[task_idx] == 0) & (new_fire_grid[gx, gy] > 0)
+            return (ts_i == 0) & (new_fire_grid[gx, gy] > 0)
 
         ts = state.task_status
-        ts = ts.at[0].set(jnp.where(fire_contam(0, ts), jnp.int32(3), ts[0]))
-        ts = ts.at[1].set(jnp.where(fire_contam(1, ts), jnp.int32(3), ts[1]))
+        contam_mask = jax.vmap(fire_contam_one)(state.task_pos, ts)
+        ts = jnp.where(contam_mask, jnp.int32(3), ts)
 
         # ---- 6. Drop carried tasks from dead robots ---- #
-        def drop_on_death(ts, tc, robot_idx, died):
-            match = (tc == robot_idx) & (ts == 1) & died
-            return jnp.where(match, jnp.int32(3), ts)
+        for i in range(NUM_ROBOTS):
+            match = (state.task_carrier == i) & (ts == 1) & dies[i]
+            ts = jnp.where(match, jnp.int32(3), ts)
+        tc = state.task_carrier
 
-        ts = drop_on_death(ts, state.task_carrier, 0, dies0)
-        ts = drop_on_death(ts, state.task_carrier, 1, dies1)
-        tc = state.task_carrier  # will update below
-
-        # ---- 7. Task pickup (sequential: robot 0 then robot 1) ---- #
+        # ---- 7. Task pickup (sequential) ---- #
         def try_pickup(robot_idx, pos, alive, carrying, task_status, task_carrier):
             can = (alive > 0.5) & (carrying < 0.5)
             dists = jnp.linalg.norm(state.task_pos - pos, axis=1)
@@ -491,12 +513,13 @@ class SycaBotEnvJAX(environment.Environment):
             new_carry = jnp.where(does_pickup, 1.0, carrying)
             return new_ts, new_tc, new_carry, does_pickup.astype(jnp.float32)
 
-        rc0 = state.robot_carrying[0]
-        rc1 = state.robot_carrying[1]
-        ts, tc, rc0, picked0 = try_pickup(0, new_pos0, new_alive0, rc0, ts, tc)
-        ts, tc, rc1, picked1 = try_pickup(1, new_pos1, new_alive1, rc1, ts, tc)
-        new_carrying = jnp.array([rc0, rc1])
-        picked_count = picked0 + picked1
+        rc = state.robot_carrying
+        picked_count = jnp.float32(0)
+        for i in range(NUM_ROBOTS):
+            ts, tc, rc_i, picked_i = try_pickup(i, new_robot_pos[i], new_alive[i], rc[i], ts, tc)
+            rc = rc.at[i].set(rc_i)
+            picked_count = picked_count + picked_i
+        new_carrying = rc
 
         # ---- 8. Update task positions (follow carrier) ---- #
         safe_tc = jnp.clip(tc, 0, NUM_ROBOTS - 1)
@@ -515,14 +538,16 @@ class SycaBotEnvJAX(environment.Environment):
             new_carry = jnp.where(can, 0.0, carrying)
             return new_ts, new_tc, new_carry, can.astype(jnp.float32)
 
-        ts, tc, rc0, deliv0 = try_deliver(0, new_pos0, new_alive0, new_carrying[0], ts, tc)
-        ts, tc, rc1, deliv1 = try_deliver(1, new_pos1, new_alive1, new_carrying[1], ts, tc)
-        new_carrying = jnp.array([rc0, rc1])
-        delivered_count = deliv0 + deliv1
+        delivered_count = jnp.float32(0)
+        for i in range(NUM_ROBOTS):
+            ts, tc, rc_i, deliv_i = try_deliver(
+                i, new_robot_pos[i], new_alive[i], new_carrying[i], ts, tc)
+            new_carrying = new_carrying.at[i].set(rc_i)
+            delivered_count = delivered_count + deliv_i
 
         # ---- 10. Progress reward ---- #
-        def progress_i(pos, alive, carrying, prev_td, prev_ed, task_pos, task_status):
-            cur_td = self._nearest_visible_task_dist(pos, task_pos, task_status)
+        def progress_i(pos, alive, carrying, prev_td, prev_ed):
+            cur_td = self._nearest_visible_task_dist(pos, new_task_pos, ts)
             cur_ed = self._nearest_visible_exit_dist(pos)
             task_prog = jnp.where(
                 (alive > 0.5) & (carrying < 0.5) & jnp.isfinite(prev_td) & jnp.isfinite(cur_td),
@@ -536,15 +561,11 @@ class SycaBotEnvJAX(environment.Environment):
                                 jnp.where(carrying > 0.5, cur_ed, jnp.nan), jnp.nan)
             return task_prog, exit_prog, new_ptd, new_ped
 
-        tp0, ep0, new_ptd0, new_ped0 = progress_i(
-            new_pos0, new_alive0, new_carrying[0],
-            state.prev_visible_task_dist[0], state.prev_visible_exit_dist[0], new_task_pos, ts)
-        tp1, ep1, new_ptd1, new_ped1 = progress_i(
-            new_pos1, new_alive1, new_carrying[1],
-            state.prev_visible_task_dist[1], state.prev_visible_exit_dist[1], new_task_pos, ts)
-
-        progress_reward = (params.task_progress_reward_weight * (tp0 + tp1) +
-                           params.exit_progress_reward_weight * (ep0 + ep1))
+        tp, ep, new_ptd, new_ped = jax.vmap(progress_i)(
+            new_robot_pos, new_alive, new_carrying,
+            state.prev_visible_task_dist, state.prev_visible_exit_dist)
+        progress_reward = (params.task_progress_reward_weight * jnp.sum(tp) +
+                           params.exit_progress_reward_weight * jnp.sum(ep))
 
         # ---- 11. Smoothness penalty ---- #
         v_curr = action[0::2]; w_curr = action[1::2]
@@ -559,26 +580,44 @@ class SycaBotEnvJAX(environment.Environment):
                  (jnp.minimum(jnp.abs(v_curr), jnp.abs(v_prev)) > 0.03)).astype(jnp.float32))
         )
 
-        # ---- 12. Reward ---- #
+        # ---- 12. Proximity penalties (obstacle + fire) ---- #
+        def _proximity_pen(pos, alive):
+            obs_dist  = self._min_obs_dist(pos)
+            fire_dist = self._nearest_fire_dist(pos, new_fire_grid)
+            obs_pen   = jnp.maximum(0.0, params.obstacle_proximity_threshold - obs_dist)
+            fire_pen  = jnp.maximum(0.0, params.fire_proximity_threshold    - fire_dist)
+            return alive * (params.obstacle_proximity_weight * obs_pen +
+                            params.fire_proximity_weight     * fire_pen)
+
+        proximity_penalty = -jnp.sum(
+            jax.vmap(_proximity_pen)(new_robot_pos, new_alive)
+        )
+
+        # ---- 13. Reward ---- #
+        survival_reward = params.survival_reward_weight * jnp.sum(new_alive)
+        # Bonus for each robot that is simultaneously alive and carrying
+        cooperation_bonus = params.cooperation_bonus_weight * jnp.sum(new_alive * new_carrying)
         reward = (
-            -3.0 * safety_events +
+            -params.death_penalty * safety_events +
             params.pickup_reward   * picked_count +
             params.delivery_reward * delivered_count +
             progress_reward +
             smooth_pen +
+            survival_reward +
+            cooperation_bonus +
+            proximity_penalty +
             -0.01
         )
-        # All-robot failure override
         all_fail = jnp.all(new_alive < 0.5) & (safety_events > 0)
-        reward = jnp.where(all_fail, -20.0, reward)
+        reward = jnp.where(all_fail, -params.all_fail_penalty, reward)
 
-        # ---- 13. Done ---- #
-        all_dead       = jnp.all(new_alive < 0.5)
-        no_active_tasks = jnp.all((ts == 2) | (ts == 3))  # all delivered or contaminated
-        time_up        = state.step_count + 1 >= params.max_steps
+        # ---- 14. Done ---- #
+        all_dead        = jnp.all(new_alive < 0.5)
+        no_active_tasks = jnp.all((ts == 2) | (ts == 3))
+        time_up         = state.step_count + 1 >= params.max_steps
         done = all_dead | no_active_tasks | time_up
 
-        # ---- 14. New state ---- #
+        # ---- 15. New state ---- #
         new_state = EnvState(
             robot_pos=new_robot_pos,
             robot_theta=new_robot_theta,
@@ -590,8 +629,8 @@ class SycaBotEnvJAX(environment.Environment):
             task_carrier=tc,
             fire_grid=new_fire_grid,
             global_safety_indicator=new_safety,
-            prev_visible_task_dist=jnp.array([new_ptd0, new_ptd1]),
-            prev_visible_exit_dist=jnp.array([new_ped0, new_ped1]),
+            prev_visible_task_dist=new_ptd,
+            prev_visible_exit_dist=new_ped,
             prev_joint_action=action,
             prev_prev_joint_action=state.prev_joint_action,
             step_count=state.step_count + 1,
@@ -604,6 +643,7 @@ class SycaBotEnvJAX(environment.Environment):
             "reward_pickup":      params.pickup_reward * picked_count,
             "reward_delivery":    params.delivery_reward * delivered_count,
             "smooth_penalty":     smooth_pen,
+            "proximity_penalty":  proximity_penalty,
             "alive_robots":       jnp.sum(new_alive > 0.5),
             "delivered_tasks":    jnp.sum(ts == 2).astype(jnp.float32),
             "contaminated_tasks": jnp.sum(ts == 3).astype(jnp.float32),

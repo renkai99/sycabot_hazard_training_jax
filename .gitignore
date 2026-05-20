@@ -1,2 +1,4 @@
-venv/
 .venv/
+results/
+test_results/
+__pycache__
