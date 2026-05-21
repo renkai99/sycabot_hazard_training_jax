@@ -496,7 +496,7 @@ class SycaBotEnvJAX(environment.Environment):
         # ---- 6. Drop carried tasks from dead robots ---- #
         for i in range(NUM_ROBOTS):
             match = (state.task_carrier == i) & (ts == 1) & dies[i]
-            ts = jnp.where(match, jnp.int32(3), ts)
+            ts = jnp.where(match, jnp.int32(0), ts)
         tc = state.task_carrier
 
         # ---- 7. Task pickup (sequential) ---- #
