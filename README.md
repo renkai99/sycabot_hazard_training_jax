@@ -250,7 +250,35 @@ The entire rollout and gradient update runs on-device. CPU↔device transfers ha
 
 ---
 
-## Run
+## Run (with screening)
+
+**Access to virtual environment:**
+```bash
+source .venv/bin/activate
+```
+**Screening:**
+1. Create a named session
+```bash
+screen -S my_train
+```
+
+2. Start the training
+```bash
+python3 PPO_training.py
+```
+
+3. Detatch from the session (when leaving the laptop)
+  1. Press CTRL+A
+  2. press 'D' (for detach)
+
+4. Re-attach later
+   when turning on the laptop again, SSH into the server again. 
+   Resume the session by:
+   ```bash
+   screen -r my_train
+   ```
+   Successfully get into the training terminal, to see the logs and processes.
+
 
 **Train from scratch:**
 
