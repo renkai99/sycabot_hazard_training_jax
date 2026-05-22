@@ -8,8 +8,8 @@ from flax import struct
 
 from environment_configs import get_lab_environment_config
 
-NUM_ROBOTS = 2
-NUM_TASKS = 2
+NUM_ROBOTS = 3
+NUM_TASKS = 3
 NUM_EXITS = 5
 
 _X_MIN, _X_MAX = -1.55, 1.55
