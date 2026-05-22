@@ -263,9 +263,23 @@ screen -S my_train
 ```
 
 2. Start the training
-```bash
-python3 PPO_training.py
-```
+      **Train from scratch:**
+      
+      ```bash
+      python3 train_ppo.py
+      ```
+      
+      **Warm-start from the most recent checkpoint:**
+      
+      ```bash
+      python3 train_ppo.py --warm-start
+      ```
+      
+      **Warm-start from a specific checkpoint:**
+      
+      ```bash
+      python3 train_ppo.py --init-params results/<run_name>/checkpoint_0110000.pkl
+      ```
 
 3. Detatch from the session (when leaving the laptop)
   1. Press CTRL+A
