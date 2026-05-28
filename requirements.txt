@@ -1,6 +1,7 @@
-# Core JAX stack  (versions matched to installed venv)
-jax==0.10.0
-jaxlib==0.10.0
+# Core JAX stack — CUDA 12 build (requires CUDA 12.x drivers on the host)
+# The [cuda12] extra pulls in the matching GPU-enabled jaxlib automatically.
+# To switch to CPU-only, replace with:  jax==0.10.0  jaxlib==0.10.0
+jax[cuda12]==0.10.0
 flax==0.12.7
 optax==0.2.8
 chex==0.1.91

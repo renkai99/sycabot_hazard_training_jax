@@ -43,7 +43,7 @@ config = {
     # Rollout
     "NUM_ENVS": 1024,
     "NUM_STEPS": 64,
-    "TOTAL_UPDATES": 100000,
+    "TOTAL_UPDATES": 300000,
     # Network
     "ACTIVATION": "tanh",
     "HIDDEN_SIZE": 256,
