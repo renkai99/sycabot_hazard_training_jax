@@ -11,7 +11,7 @@ from environment_configs import get_lab_environment_config
 NUM_ROBOTS = 2
 NUM_TASKS = 2
 NUM_EXITS = 5
-NUM_HAZARDS = 2
+NUM_HAZARDS = 1
 
 _X_MIN, _X_MAX = -1.55, 1.55
 _Y_MIN, _Y_MAX = -3.10, 3.10
