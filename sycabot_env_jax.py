@@ -326,14 +326,17 @@ class SycaBotEnvJAX(environment.Environment):
         return EnvParams()
 
     def reset_env(self, key: chex.PRNGKey, params: EnvParams) -> Tuple[chex.Array, EnvState]:
-        # +1 for exit-permutation key
-        n_keys = 1 + 2 * NUM_ROBOTS + NUM_TASKS + 1  # perm, pos, theta, task, fire
-        all_keys = jax.random.split(key, n_keys)
-        perm_key   = all_keys[0]
-        robot_keys = all_keys[1 : 1 + NUM_ROBOTS]
-        theta_keys = all_keys[1 + NUM_ROBOTS : 1 + 2 * NUM_ROBOTS]
-        task_keys  = all_keys[1 + 2 * NUM_ROBOTS : 1 + 2 * NUM_ROBOTS + NUM_TASKS]
-        kfire      = all_keys[-1]
+        # Split into exactly 5 fixed base keys so that robot positions, headings,
+        # and the fire seed are independent of NUM_TASKS (and NUM_ROBOTS).
+        # Per-robot and per-task keys are then derived via fold_in(base, index),
+        # which gives two important properties for Monte Carlo comparisons:
+        #   1. robot_keys[r] and kfire are identical for any NUM_TASKS value.
+        #   2. task_keys[t] is identical for any NUM_TASKS ≥ t+1, so adding
+        #      more tasks simply appends new spawn positions (cumulative).
+        perm_key, robot_base, theta_base, task_base, kfire = jax.random.split(key, 5)
+        robot_keys = jax.vmap(lambda i: jax.random.fold_in(robot_base, i))(jnp.arange(NUM_ROBOTS))
+        theta_keys = jax.vmap(lambda i: jax.random.fold_in(theta_base, i))(jnp.arange(NUM_ROBOTS))
+        task_keys  = jax.vmap(lambda i: jax.random.fold_in(task_base,  i))(jnp.arange(NUM_TASKS))
 
         # Assign each robot a unique exit (no two robots share the same exit)
         exit_assign = jax.random.permutation(perm_key, NUM_EXITS)[:NUM_ROBOTS]  # (NUM_ROBOTS,)
