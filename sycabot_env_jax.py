@@ -8,7 +8,7 @@ from flax import struct
 
 from environment_configs import get_lab_environment_config
 
-NUM_ROBOTS = 3
+NUM_ROBOTS = 2
 NUM_TASKS = 3
 NUM_EXITS = 5
 NUM_HAZARDS = 1
@@ -53,7 +53,7 @@ class EnvParams:
     w_max: float = np.pi / 6.0
     robot_radius: float = 0.08
     collision_distance: float = 0.16   # 2 * robot_radius
-    fire_spread_prob: float = 0.020
+    fire_spread_prob: float = 0.02
     fire_kill_prob: float = 0.2
     fire_cell_size: float = _CELL_SIZE
     num_initial_fires: int = NUM_HAZARDS       # number of independent fire seeds at episode start
