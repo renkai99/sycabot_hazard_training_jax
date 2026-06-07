@@ -8,15 +8,17 @@ from flax import struct
 
 from environment_configs import get_lab_environment_config
 
-NUM_ROBOTS = 3
-NUM_TASKS = 3
+NUM_ROBOTS = 2
+NUM_TASKS = 2
 NUM_EXITS = 5
+NUM_HAZARDS = 2
 
 _X_MIN, _X_MAX = -1.55, 1.55
 _Y_MIN, _Y_MAX = -3.10, 3.10
 _CELL_SIZE = 0.08
 GRID_X = int(np.ceil((_X_MAX - _X_MIN) / _CELL_SIZE))   # 39
 GRID_Y = int(np.ceil((_Y_MAX - _Y_MIN) / _CELL_SIZE))   # 78
+_MAX_INITIAL_FIRES = 10   # static upper bound; actual count set via EnvParams.num_initial_fires
 
 
 @struct.dataclass
@@ -54,6 +56,7 @@ class EnvParams:
     fire_spread_prob: float = 0.020
     fire_kill_prob: float = 0.2
     fire_cell_size: float = _CELL_SIZE
+    num_initial_fires: int = NUM_HAZARDS       # number of independent fire seeds at episode start
     pickup_reward: float = 6.0
     delivery_reward: float = 8.0
     smooth_action_weight: float = 0.006
@@ -302,12 +305,17 @@ class SycaBotEnvJAX(environment.Environment):
         new_cells = has_burning_nb & (fire_grid == 0) & spreads & (self.non_obstacle_mask > 0)
         return jnp.maximum(fire_grid, new_cells.astype(jnp.float32))
 
-    def _spawn_fire(self, key):
-        # O(1) table lookup – no while_loop
+    def _spawn_fire(self, key, num_fires):
+        # Sample _MAX_INITIAL_FIRES unique valid cells; activate only the first num_fires.
+        # _MAX_INITIAL_FIRES is a Python constant so the shape is static for JAX.
+        # num_fires is a traced int from EnvParams — used only in a dynamic comparison.
         n = self.valid_fire_cells.shape[0]
-        flat_idx = self.valid_fire_cells[jax.random.randint(key, (), 0, n)]
-        return (jnp.zeros((GRID_X, GRID_Y), dtype=jnp.float32)
-                .at[flat_idx // GRID_Y, flat_idx % GRID_Y].set(1.0))
+        indices   = jax.random.choice(key, n, shape=(_MAX_INITIAL_FIRES,), replace=False)
+        flat_idxs = self.valid_fire_cells[indices]
+        gx = flat_idxs // GRID_Y
+        gy = flat_idxs % GRID_Y
+        active = (jnp.arange(_MAX_INITIAL_FIRES) < num_fires).astype(jnp.float32)
+        return jnp.zeros((GRID_X, GRID_Y), dtype=jnp.float32).at[gx, gy].set(active)
 
     # ------------------------------------------------------------------ #
     #  Gymnax API                                                         #
@@ -318,14 +326,17 @@ class SycaBotEnvJAX(environment.Environment):
         return EnvParams()
 
     def reset_env(self, key: chex.PRNGKey, params: EnvParams) -> Tuple[chex.Array, EnvState]:
-        # +1 for exit-permutation key
-        n_keys = 1 + 2 * NUM_ROBOTS + NUM_TASKS + 1  # perm, pos, theta, task, fire
-        all_keys = jax.random.split(key, n_keys)
-        perm_key   = all_keys[0]
-        robot_keys = all_keys[1 : 1 + NUM_ROBOTS]
-        theta_keys = all_keys[1 + NUM_ROBOTS : 1 + 2 * NUM_ROBOTS]
-        task_keys  = all_keys[1 + 2 * NUM_ROBOTS : 1 + 2 * NUM_ROBOTS + NUM_TASKS]
-        kfire      = all_keys[-1]
+        # Split into exactly 5 fixed base keys so that robot positions, headings,
+        # and the fire seed are independent of NUM_TASKS (and NUM_ROBOTS).
+        # Per-robot and per-task keys are then derived via fold_in(base, index),
+        # which gives two important properties for Monte Carlo comparisons:
+        #   1. robot_keys[r] and kfire are identical for any NUM_TASKS value.
+        #   2. task_keys[t] is identical for any NUM_TASKS ≥ t+1, so adding
+        #      more tasks simply appends new spawn positions (cumulative).
+        perm_key, robot_base, theta_base, task_base, kfire = jax.random.split(key, 5)
+        robot_keys = jax.vmap(lambda i: jax.random.fold_in(robot_base, i))(jnp.arange(NUM_ROBOTS))
+        theta_keys = jax.vmap(lambda i: jax.random.fold_in(theta_base, i))(jnp.arange(NUM_ROBOTS))
+        task_keys  = jax.vmap(lambda i: jax.random.fold_in(task_base,  i))(jnp.arange(NUM_TASKS))
 
         # Assign each robot a unique exit (no two robots share the same exit)
         exit_assign = jax.random.permutation(perm_key, NUM_EXITS)[:NUM_ROBOTS]  # (NUM_ROBOTS,)
@@ -342,7 +353,7 @@ class SycaBotEnvJAX(environment.Environment):
         task_pos    = self.valid_task_spawns[
             jax.vmap(lambda k: jax.random.randint(k, (), 0, n_t))(task_keys)]
 
-        fire_grid = self._spawn_fire(kfire)
+        fire_grid = self._spawn_fire(kfire, params.num_initial_fires)
         task_status = jnp.zeros(NUM_TASKS, dtype=jnp.int32)
 
         pvtd = jax.vmap(self._nearest_visible_task_dist, in_axes=(0, None, None))(

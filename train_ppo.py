@@ -42,9 +42,11 @@ config = {
     "CLIP_VF": True,
     "KL_THRESHOLD": 0.015,
     # Rollout
+
     "NUM_ENVS": 1024, # of environments to run in parallel on the GPU; adjust based on GPU memory and env complexity
     "NUM_STEPS": 64, # minibatch
     "TOTAL_UPDATES": 10000, # total PPO updates (not env steps; total env steps = NUM_ENVS * NUM_STEPS * TOTAL_UPDATES)
+
     # Network
     "ACTIVATION": "tanh",
     "HIDDEN_SIZE": 256,
