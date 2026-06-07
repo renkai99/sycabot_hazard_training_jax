@@ -320,6 +320,25 @@ python3 test_and_visualize.py --deterministic --plot --episodes 20
 Output files are written to `test_results/` by default (override with `--out-dir`).
 
 ---
+**Create a bot plot**
+```bash
+python3 test_and_visualize.py --episodes 8 --boxplot-episodes 8 --deterministic
+```
+```bash
+python3 test_and_visualize.py --episodes 30 --boxplot-episodes 30 --deterministic
+```
+```bash
+python3 test_and_visualize.py --episodes 100 --boxplot-episodes all --deterministic
+```
+Each title looks like:
+
+r(3)_t(3)_ep(8)_task_rescue_rate
+and it saves both:
+
+r3_t3_ep8_task_rescue_rate.png
+r3_t3_ep8_task_rescue_rate.csv
+Verified with py_compile
+---
 
 **Render a trained policy** using `SycaBotRendererJAX` from [sycabot_render_jax.py](sycabot_render_jax.py):
 
