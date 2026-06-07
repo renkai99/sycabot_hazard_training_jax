@@ -18,6 +18,7 @@ Usage examples
 """
 
 import argparse
+import csv
 import glob
 import os
 import sys
@@ -32,7 +33,10 @@ import matplotlib.patches as mpatches
 from matplotlib.collections import LineCollection
 from flax import serialization
 
-from sycabot_env_jax import SycaBotEnvJAX, EnvParams, GRID_X, GRID_Y, _X_MIN, _Y_MIN, _CELL_SIZE
+from sycabot_env_jax import (
+    SycaBotEnvJAX, EnvParams, GRID_X, GRID_Y, NUM_ROBOTS, NUM_TASKS,
+    _X_MIN, _Y_MIN, _CELL_SIZE,
+)
 
 # One distinct colour per robot slot; extend if NUM_ROBOTS ever exceeds 6.
 _ROBOT_PALETTE = ["royalblue", "darkorange", "forestgreen", "crimson", "orchid", "sienna"]
@@ -379,6 +383,51 @@ def plot_summary(all_histories, out_dir: str):
     print(f"\nSaved summary plot → {save_path}")
 
 
+def save_raw_metrics(all_histories, out_dir: str):
+    """Save numeric rollout metrics used by the plots."""
+    episode_path = os.path.join(out_dir, "episode_metrics.csv")
+    with open(episode_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "num_robots", "num_tasks", "episode", "total_reward", "length",
+                "max_delivered", "max_contaminated", "final_safety",
+            ],
+        )
+        writer.writeheader()
+        for ep, h in enumerate(all_histories, start=1):
+            writer.writerow({
+                "num_robots": NUM_ROBOTS,
+                "num_tasks": NUM_TASKS,
+                "episode": ep,
+                "total_reward": h["total_reward"],
+                "length": h["length"],
+                "max_delivered": max(h["delivered"]) if h["delivered"] else 0,
+                "max_contaminated": max(h["contaminated"]) if h["contaminated"] else 0,
+                "final_safety": h["safety"][-1] if h["safety"] else 0,
+            })
+
+    delivered_path = os.path.join(out_dir, "delivered_timeseries.csv")
+    with open(delivered_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["num_robots", "num_tasks", "episode", "step", "delivered"],
+        )
+        writer.writeheader()
+        for ep, h in enumerate(all_histories, start=1):
+            for step, delivered in zip(h["step"], h["delivered"]):
+                writer.writerow({
+                    "num_robots": NUM_ROBOTS,
+                    "num_tasks": NUM_TASKS,
+                    "episode": ep,
+                    "step": step,
+                    "delivered": delivered,
+                })
+
+    print(f"Saved raw episode metrics → {episode_path}")
+    print(f"Saved delivered time series → {delivered_path}")
+
+
 # ========================================================================== #
 #  Video export                                                               #
 # ========================================================================== #
@@ -573,6 +622,8 @@ def main():
 
     if do_plot:
         plot_summary(all_histories, args.out_dir)
+
+    save_raw_metrics(all_histories, args.out_dir)
 
     if args.video:
         save_video(all_histories, env, env_params, args.out_dir, fps=args.fps)

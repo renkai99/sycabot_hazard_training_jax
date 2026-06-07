@@ -15,8 +15,10 @@ class LogEnvState:
     env_state: chex.PyTreeDef
     episode_returns: float
     episode_lengths: int
+    episode_max_delivered: float
     returned_episode_returns: float
     returned_episode_lengths: int
+    returned_episode_max_delivered: float
     returned_episode: bool
 
 
@@ -36,8 +38,10 @@ class LogWrapper(environment.Environment):
             env_state=env_state,
             episode_returns=0.0,
             episode_lengths=0,
+            episode_max_delivered=0.0,
             returned_episode_returns=0.0,
             returned_episode_lengths=0,
+            returned_episode_max_delivered=0.0,
             returned_episode=False,
         )
         return obs, state
@@ -50,6 +54,7 @@ class LogWrapper(environment.Environment):
 
         new_returns = state.episode_returns + reward
         new_lengths = state.episode_lengths + 1
+        new_max_delivered = jnp.maximum(state.episode_max_delivered, info["delivered_tasks"])
 
         # Auto-reset: when the episode is done, replace env_state/obs with a
         # fresh reset so the next scan step begins a new episode.
@@ -63,14 +68,18 @@ class LogWrapper(environment.Environment):
             env_state=env_state,
             episode_returns=new_returns * (1 - done),
             episode_lengths=new_lengths * (1 - done),
+            episode_max_delivered=new_max_delivered * (1 - done),
             returned_episode_returns=jnp.where(done, new_returns, state.returned_episode_returns),
             returned_episode_lengths=jnp.where(done, new_lengths, state.returned_episode_lengths),
+            returned_episode_max_delivered=jnp.where(
+                done, new_max_delivered, state.returned_episode_max_delivered),
             returned_episode=done,
         )
 
         info["returned_episode"] = done
         info["returned_episode_returns"] = new_state.returned_episode_returns
         info["returned_episode_lengths"] = new_state.returned_episode_lengths
+        info["returned_episode_max_delivered"] = new_state.returned_episode_max_delivered
         return obs, new_state, reward, done, info
 
     def action_space(self, params=None):

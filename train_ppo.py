@@ -1,6 +1,7 @@
 """Unconstrained PPO for SycaBot Hazard Training – pure JAX / GPU parallel."""
 
 import argparse
+import csv
 import glob
 import os
 import pickle
@@ -296,6 +297,10 @@ def make_train(config, init_params=None, save_dir=None):
         runner_state = (train_state, env_state, obsv, rng)
         all_metrics  = []
         best_return  = -float("inf")
+        total_completed_episodes = 0
+        total_episode_max_delivered = 0.0
+        cumulative_avg_max_delivered = 0.0
+        cumulative_task_rescue_rate = 0.0
 
         ckpt_interval = config.get("CHECKPOINT_INTERVAL", 0)
 
@@ -303,22 +308,45 @@ def make_train(config, init_params=None, save_dir=None):
             runner_state, traj = _update_step(runner_state, step)
 
             inf_cpu = jax.device_get(traj.info)
-            ep_rets = inf_cpu["returned_episode_returns"][inf_cpu["returned_episode"]]
+            returned = inf_cpu["returned_episode"].astype(bool)
+            ep_rets = inf_cpu["returned_episode_returns"][returned]
             avg_ep  = float(ep_rets.mean()) if ep_rets.size > 0 else 0.0
+            ep_max_delivered = inf_cpu["returned_episode_max_delivered"][returned]
+            completed_episodes = int(ep_max_delivered.size)
+            avg_ep_max_delivered = (
+                float(ep_max_delivered.mean()) if completed_episodes > 0 else 0.0
+            )
+            avg_task_rescue_rate = avg_ep_max_delivered / float(NUM_TASKS)
+
+            total_completed_episodes += completed_episodes
+            total_episode_max_delivered += float(ep_max_delivered.sum())
+            cumulative_avg_max_delivered = (
+                total_episode_max_delivered / total_completed_episodes
+                if total_completed_episodes > 0 else 0.0
+            )
+            cumulative_task_rescue_rate = cumulative_avg_max_delivered / float(NUM_TASKS)
 
             if (step + 1) % config["PRINT_INTERVAL"] == 0:
                 print(f"\n[Step {step+1}/{total_updates}]  "
                       f"avg_ep_return={avg_ep:.1f}  "
+                      f"rescue_rate={avg_task_rescue_rate:.3f}  "
                       f"alive={inf_cpu['alive_robots'].mean():.2f}  "
                       f"delivered={inf_cpu['delivered_tasks'].mean():.3f}  "
                       f"contaminated={inf_cpu['contaminated_tasks'].mean():.3f}  "
                       f"safety={inf_cpu['safety_indicator'].mean():.3f}")
 
             metrics = {
+                "num_robots": NUM_ROBOTS,
+                "num_tasks": NUM_TASKS,
                 "charts/avg_episode_return": avg_ep,
                 "charts/safety_indicator":   float(inf_cpu["safety_indicator"].mean()),
                 "charts/alive_robots":       float(inf_cpu["alive_robots"].mean()),
                 "charts/delivered_tasks":    float(inf_cpu["delivered_tasks"].mean()),
+                "charts/avg_episode_max_delivered": avg_ep_max_delivered,
+                "charts/task_rescue_rate":    avg_task_rescue_rate,
+                "charts/cumulative_task_rescue_rate": cumulative_task_rescue_rate,
+                "charts/completed_episodes":  completed_episodes,
+                "charts/total_completed_episodes": total_completed_episodes,
                 "charts/contaminated_tasks": float(inf_cpu["contaminated_tasks"].mean()),
                 "rewards/progress":          float(inf_cpu["reward_progress"].mean()),
                 "rewards/pickup":            float(inf_cpu["reward_pickup"].mean()),
@@ -341,7 +369,14 @@ def make_train(config, init_params=None, save_dir=None):
                 with open(best_path, "wb") as f:
                     f.write(serialization.to_bytes(current_params))
 
-        return {"runner_state": runner_state, "metrics": all_metrics}
+        final_stats = {
+            "num_robots": NUM_ROBOTS,
+            "num_tasks": NUM_TASKS,
+            "total_completed_episodes": total_completed_episodes,
+            "cumulative_avg_episode_max_delivered": cumulative_avg_max_delivered,
+            "cumulative_task_rescue_rate": cumulative_task_rescue_rate,
+        }
+        return {"runner_state": runner_state, "metrics": all_metrics, "final_stats": final_stats}
 
     return train
 
@@ -369,6 +404,32 @@ def _load_params(path, network, obs_dim):
     with open(path, "rb") as f:
         raw = f.read()
     return serialization.from_bytes(template, raw)
+
+
+def _save_training_metrics(save_dir, metrics, final_stats):
+    metrics_pkl_path = os.path.join(save_dir, "training_metrics.pkl")
+    with open(metrics_pkl_path, "wb") as f:
+        pickle.dump({"metrics": metrics, "final_stats": final_stats}, f)
+
+    if metrics:
+        metrics_csv_path = os.path.join(save_dir, "training_metrics.csv")
+        fieldnames = list(metrics[0].keys())
+        with open(metrics_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(metrics)
+    else:
+        metrics_csv_path = None
+
+    stats_path = os.path.join(save_dir, "final_training_stats.txt")
+    with open(stats_path, "w") as f:
+        for key, value in final_stats.items():
+            f.write(f"{key}: {value}\n")
+
+    print(f"Saved training metrics → {metrics_pkl_path}")
+    if metrics_csv_path is not None:
+        print(f"Saved training metrics CSV → {metrics_csv_path}")
+    print(f"Saved final training stats → {stats_path}")
 
 
 if __name__ == "__main__":
@@ -422,6 +483,15 @@ if __name__ == "__main__":
     train_fn = make_train(config, init_params=init_params, save_dir=save_dir)
     print(f"Starting training  |  {jax.device_count()} device(s): {jax.devices()}")
     out = train_fn(rng)
+
+    _save_training_metrics(save_dir, out["metrics"], out["final_stats"])
+    wandb.summary["total_completed_episodes"] = out["final_stats"]["total_completed_episodes"]
+    wandb.summary["cumulative_avg_episode_max_delivered"] = (
+        out["final_stats"]["cumulative_avg_episode_max_delivered"]
+    )
+    wandb.summary["cumulative_task_rescue_rate"] = (
+        out["final_stats"]["cumulative_task_rescue_rate"]
+    )
     wandb.finish()
 
     # ---- Save final params ---- #
