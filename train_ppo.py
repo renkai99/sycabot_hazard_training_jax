@@ -299,8 +299,6 @@ def make_train(config, init_params=None, save_dir=None):
         best_return  = -float("inf")
         total_completed_episodes = 0
         total_episode_max_delivered = 0.0
-        cumulative_avg_max_delivered = 0.0
-        cumulative_task_rescue_rate = 0.0
 
         ckpt_interval = config.get("CHECKPOINT_INTERVAL", 0)
 
@@ -313,23 +311,17 @@ def make_train(config, init_params=None, save_dir=None):
             avg_ep  = float(ep_rets.mean()) if ep_rets.size > 0 else 0.0
             ep_max_delivered = inf_cpu["returned_episode_max_delivered"][returned]
             completed_episodes = int(ep_max_delivered.size)
-            avg_ep_max_delivered = (
-                float(ep_max_delivered.mean()) if completed_episodes > 0 else 0.0
-            )
-            avg_task_rescue_rate = avg_ep_max_delivered / float(NUM_TASKS)
-
             total_completed_episodes += completed_episodes
             total_episode_max_delivered += float(ep_max_delivered.sum())
-            cumulative_avg_max_delivered = (
-                total_episode_max_delivered / total_completed_episodes
+            task_rescue_rate = (
+                total_episode_max_delivered / total_completed_episodes / float(NUM_TASKS) * 100.0
                 if total_completed_episodes > 0 else 0.0
             )
-            cumulative_task_rescue_rate = cumulative_avg_max_delivered / float(NUM_TASKS)
 
             if (step + 1) % config["PRINT_INTERVAL"] == 0:
                 print(f"\n[Step {step+1}/{total_updates}]  "
                       f"avg_ep_return={avg_ep:.1f}  "
-                      f"rescue_rate={avg_task_rescue_rate:.3f}  "
+                      f"task_rescue_rate={task_rescue_rate:.1f}%  "
                       f"alive={inf_cpu['alive_robots'].mean():.2f}  "
                       f"delivered={inf_cpu['delivered_tasks'].mean():.3f}  "
                       f"contaminated={inf_cpu['contaminated_tasks'].mean():.3f}  "
@@ -342,11 +334,7 @@ def make_train(config, init_params=None, save_dir=None):
                 "charts/safety_indicator":   float(inf_cpu["safety_indicator"].mean()),
                 "charts/alive_robots":       float(inf_cpu["alive_robots"].mean()),
                 "charts/delivered_tasks":    float(inf_cpu["delivered_tasks"].mean()),
-                "charts/avg_episode_max_delivered": avg_ep_max_delivered,
-                "charts/task_rescue_rate":    avg_task_rescue_rate,
-                "charts/cumulative_task_rescue_rate": cumulative_task_rescue_rate,
-                "charts/completed_episodes":  completed_episodes,
-                "charts/total_completed_episodes": total_completed_episodes,
+                "charts/task_rescue_rate":    task_rescue_rate,
                 "charts/contaminated_tasks": float(inf_cpu["contaminated_tasks"].mean()),
                 "rewards/progress":          float(inf_cpu["reward_progress"].mean()),
                 "rewards/pickup":            float(inf_cpu["reward_pickup"].mean()),
@@ -372,9 +360,7 @@ def make_train(config, init_params=None, save_dir=None):
         final_stats = {
             "num_robots": NUM_ROBOTS,
             "num_tasks": NUM_TASKS,
-            "total_completed_episodes": total_completed_episodes,
-            "cumulative_avg_episode_max_delivered": cumulative_avg_max_delivered,
-            "cumulative_task_rescue_rate": cumulative_task_rescue_rate,
+            "final_task_rescue_rate": all_metrics[-1]["charts/task_rescue_rate"] if all_metrics else 0.0,
         }
         return {"runner_state": runner_state, "metrics": all_metrics, "final_stats": final_stats}
 
@@ -485,13 +471,7 @@ if __name__ == "__main__":
     out = train_fn(rng)
 
     _save_training_metrics(save_dir, out["metrics"], out["final_stats"])
-    wandb.summary["total_completed_episodes"] = out["final_stats"]["total_completed_episodes"]
-    wandb.summary["cumulative_avg_episode_max_delivered"] = (
-        out["final_stats"]["cumulative_avg_episode_max_delivered"]
-    )
-    wandb.summary["cumulative_task_rescue_rate"] = (
-        out["final_stats"]["cumulative_task_rescue_rate"]
-    )
+    wandb.summary["final_task_rescue_rate"] = out["final_stats"]["final_task_rescue_rate"]
     wandb.finish()
 
     # ---- Save final params ---- #
