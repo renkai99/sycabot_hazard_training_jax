@@ -82,28 +82,35 @@ def _read_rl_csv(path):
 def _read_trad_csv(path):
     """Return dict {normalised_key → bxp_stats_dict (values in %)}.
 
-    Traditional CSV has only tasks_rescued_pct, success_rate_mean, num_trials.
-    Box is approximated via Bernoulli std; median = mean (no true median data).
+    Expects a raw per-trial CSV where the last column is the parameter being
+    varied (e.g. hazard_count, pf_value, task_count) and tasks_rescued_pct
+    holds the per-trial rescue percentage.  Proper quartiles are computed
+    directly from the raw data — no approximation needed.
     """
-    rows = {}
+    # Collect per-trial values grouped by the parameter column (last column)
+    groups: dict = {}
     with open(path) as f:
-        for r in csv.DictReader(f):
-            key   = _normalise_key(list(r.values())[0])
-            mean  = float(r["tasks_rescued_pct"])
-            n     = float(r["num_trials"])
-            p     = np.clip(mean / 100.0, 1e-6, 1 - 1e-6)
-            std   = np.sqrt(p * (1 - p) / n) * 100        # Bernoulli approximation
-            q1    = np.clip(mean - 0.674 * std, 0.0, 100.0)
-            q3    = np.clip(mean + 0.674 * std, 0.0, 100.0)
-            iqr   = q3 - q1
-            rows[key] = {
-                "med":    mean,
-                "q1":     q1,
-                "q3":     q3,
-                "whislo": max(0.0,   q1 - 1.5 * iqr),
-                "whishi": min(100.0, q3 + 1.5 * iqr),
-                "fliers": [],
-            }
+        reader = csv.DictReader(f)
+        param_col = reader.fieldnames[-1]          # last column = varied parameter
+        for r in reader:
+            key = _normalise_key(r[param_col])
+            groups.setdefault(key, []).append(float(r["tasks_rescued_pct"]))
+
+    rows = {}
+    for key, vals in groups.items():
+        arr    = np.array(vals, dtype=np.float32)
+        med    = float(np.median(arr))
+        q1     = float(np.percentile(arr, 25))
+        q3     = float(np.percentile(arr, 75))
+        iqr    = q3 - q1
+        rows[key] = {
+            "med":    med,
+            "q1":     q1,
+            "q3":     q3,
+            "whislo": max(0.0,   q1 - 1.5 * iqr),
+            "whishi": min(100.0, q3 + 1.5 * iqr),
+            "fliers": [],
+        }
     return rows
 
 
@@ -242,17 +249,17 @@ def main():
     rl_hazards = _auto(args.rl_hazards, args.rl_hazards,
                        os.path.join(D, "hazards_results.csv"))
     tr_hazards = _auto(args.tr_hazards, args.tr_hazards,
-                       os.path.join(D, "hazard_count_success_summary.csv"))
+                       os.path.join(D, "hazard_count_vs_success_raw.csv"))
 
     rl_spread  = _auto(args.rl_spread, args.rl_spread,
                        os.path.join(D, "spread_results.csv"))
     tr_spread  = _auto(args.tr_spread, args.tr_spread,
-                       os.path.join(D, "pf_success_summary.csv"))
+                       os.path.join(D, "pf_vs_success_raw.csv"))
 
     rl_tasks   = _auto(args.rl_tasks, args.rl_tasks,
                        os.path.join(D, "tasks_results.csv"))
     tr_tasks   = _auto(args.tr_tasks, args.tr_tasks,
-                       os.path.join(D, "task_count_success_summary.csv"))
+                       os.path.join(D, "task_count_vs_success_raw.csv"))
 
     # ── Hazard count comparison ─────────────────────────────────────────────
     if rl_hazards and tr_hazards and os.path.isfile(rl_hazards) and os.path.isfile(tr_hazards):
