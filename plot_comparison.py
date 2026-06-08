@@ -174,9 +174,9 @@ def _comparison_plot(rl_rows, trad_rows, xlabel, title, out_path, label_fmt="{}"
     ax.set_xticklabels([_fmt_label(k, label_fmt) for k in all_keys])
     ax.set_xlim(0.4, n + 0.6)
     ax.set_ylim(-5, 105)
-    ax.set_xlabel(xlabel, fontsize=11)
-    ax.set_ylabel("Task rescue rate (%)", fontsize=11)
-    ax.set_title(title, fontsize=12)
+    ax.set_xlabel(xlabel, fontsize=14)
+    ax.set_ylabel("Task rescue rate (%)", fontsize=14)
+    ax.set_title(title, fontsize=15)
     ax.axhline(50, color="gray", linestyle="--", linewidth=0.8, alpha=0.45)
     ax.grid(True, axis="y", alpha=0.35)
 
@@ -295,7 +295,7 @@ def main():
             _read_rl_csv(rl_tasks),
             _read_trad_csv(tr_tasks),
             xlabel    = "Number of tasks",
-            title     = "Task rescue rate vs. number of tasks\n(2 robots, matched policy per task count)",
+            title     = "Task rescue rate vs. number of tasks\n(2 robots, varying task numbers)",
             out_path  = os.path.join(D, "comparison_tasks.png"),
         )
     else:
