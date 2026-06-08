@@ -185,9 +185,9 @@ def _comparison_plot(rl_rows, trad_rows, xlabel, title, out_path, label_fmt="{}"
         mpatches.Patch(facecolor=RL_COLOR,   alpha=0.65, edgecolor="black",
                        label="RL policy"),
         mpatches.Patch(facecolor=TRAD_COLOR, alpha=0.65, edgecolor="black",
-                       label="Traditional method"),
+                       label="Conventional method"), 
     ]
-    ax.legend(handles=legend_handles, loc="best", fontsize=8.5, framealpha=0.9)
+    ax.legend(handles=legend_handles, loc="lower left", fontsize=12, framealpha=0.9)
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
