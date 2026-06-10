@@ -3,23 +3,25 @@
 For each test (hazards / spread / tasks) both methods are drawn at the same
 x-position, offset slightly left (RL) and right (traditional).
 
-RL boxes     — proper quartiles from monte_carlo_analysis.py output CSVs.
-Traditional  — from raw data CSVs where each row is a trial with a specific parameter value (e.g. hazard_count) and a per-trial rescue percentage (tasks_rescued_pct).
+Both RL and traditional CSVs use the same raw per-episode format:
+    episode, n_tasks, n_realizations, tasks_rescued_pct, <param_col>
+where <param_col> is the last column (the varied parameter).
+True quartiles are computed directly from the per-episode rows.
 
 Median connection lines
   RL          — red solid  line through RL medians
-  Traditional — red dashed line through traditional means
+  Traditional — red dashed line through traditional medians
 
 Usage
 -----
     python plot_comparison.py                      # auto-discovers files
     python plot_comparison.py \\
         --rl-hazards  mc_results/hazards_results.csv \\
-        --tr-hazards  mc_results/hazard_count_success_summary.csv \\
+        --tr-hazards  mc_results/hazard_count_vs_success_raw.csv \\
         --rl-spread   mc_results/spread_results.csv \\
-        --tr-spread   mc_results/pf_success_summary.csv \\
+        --tr-spread   mc_results/pf_vs_success_raw.csv \\
         --rl-tasks    mc_results/tasks_results.csv \\
-        --tr-tasks    mc_results/task_count_success_summary.csv \\
+        --tr-tasks    mc_results/task_count_vs_success_raw.csv \\
         --out-dir     mc_results
 """
 
@@ -50,30 +52,6 @@ def _normalise_key(s):
         return float(s)
     except ValueError:
         return s
-
-
-def _read_rl_csv(path):
-    """Return dict {normalised_key → bxp_stats_dict (values in %)}.
-
-    RL CSV has rescue_rate_q25 / q75 / median columns.
-    """
-    rows = {}
-    with open(path) as f:
-        for r in csv.DictReader(f):
-            key = _normalise_key(list(r.values())[0])
-            med = float(r["rescue_rate_median"]) * 100
-            q1  = float(r["rescue_rate_q25"])   * 100
-            q3  = float(r["rescue_rate_q75"])   * 100
-            iqr = q3 - q1
-            rows[key] = {
-                "med":    med,
-                "q1":     q1,
-                "q3":     q3,
-                "whislo": max(0.0,   q1 - 1.5 * iqr),
-                "whishi": min(100.0, q3 + 1.5 * iqr),
-                "fliers": [],
-            }
-    return rows
 
 
 def _read_trad_csv(path):
@@ -262,7 +240,7 @@ def main():
     if rl_hazards and tr_hazards and os.path.isfile(rl_hazards) and os.path.isfile(tr_hazards):
         print(f"Hazards:  RL={rl_hazards}  Traditional={tr_hazards}")
         _comparison_plot(
-            _read_rl_csv(rl_hazards),
+            _read_trad_csv(rl_hazards),
             _read_trad_csv(tr_hazards),
             xlabel    = "Number of initial hazards",
             title     = "Task rescue rate vs. number of hazards\n(2 robots, 2 tasks)",
@@ -275,7 +253,7 @@ def main():
     if rl_spread and tr_spread and os.path.isfile(rl_spread) and os.path.isfile(tr_spread):
         print(f"Spread:   RL={rl_spread}  Traditional={tr_spread}")
         _comparison_plot(
-            _read_rl_csv(rl_spread),
+            _read_trad_csv(rl_spread),
             _read_trad_csv(tr_spread),
             xlabel    = "Fire spread probability",
             title     = "Task rescue rate vs. fire spread rate\n(2 robots, 2 tasks)",
@@ -289,7 +267,7 @@ def main():
     if rl_tasks and tr_tasks and os.path.isfile(rl_tasks) and os.path.isfile(tr_tasks):
         print(f"Tasks:    RL={rl_tasks}  Traditional={tr_tasks}")
         _comparison_plot(
-            _read_rl_csv(rl_tasks),
+            _read_trad_csv(rl_tasks),
             _read_trad_csv(tr_tasks),
             xlabel    = "Number of tasks",
             title     = "Task rescue rate vs. number of tasks\n(2 robots, varying task numbers)",

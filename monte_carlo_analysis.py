@@ -279,27 +279,18 @@ def test_tasks(n_episodes, max_steps, seed, task_counts, out_dir, n_realizations
 
 def _save_csv(data_dict, var_col, n_tasks, out_path, label_fmt="{}",
               n_realizations=1):
-    """Write per-configuration summary statistics to a CSV file.
+    """Write one row per episode (raw data) to a CSV file.
 
     n_tasks  fixed int for hazard/spread tests; pass None for the tasks test,
              in which case each row uses its key value as n_tasks.
 
     Columns
     -------
-    <var_col>           value of the varied parameter
-    num_episodes        episodes run per configuration
-    n_realizations      stochastic rollouts averaged per episode
-    n_tasks             number of tasks per episode
-    rescue_rate_mean    mean(delivered / n_tasks) across episodes  [0–1]
-    rescue_rate_median  median of the same
-    rescue_rate_std     standard deviation
-    rescue_rate_q25     25th percentile
-    rescue_rate_q75     75th percentile
-    tasks_rescued_pct   rescue_rate_mean * 100                     [0–100]
-    tasks_rescued_mean  rescue_rate_mean * n_tasks                 expected tasks/ep
-    full_success_rate   fraction of episodes where ALL tasks delivered
-    full_success_count  full_success_rate * num_episodes
-    failure_count       (1 – full_success_rate) * num_episodes
+    episode           0-based episode index
+    n_tasks           number of tasks in the episode
+    n_realizations    stochastic rollouts averaged to produce tasks_rescued_pct
+    tasks_rescued_pct rescue rate for this episode (%)  [0–100]
+    <var_col>         value of the varied parameter (last column)
     """
     import csv
 
@@ -308,34 +299,19 @@ def _save_csv(data_dict, var_col, n_tasks, out_path, label_fmt="{}",
 
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            var_col, "num_episodes", "n_realizations", "n_tasks",
-            "rescue_rate_mean", "rescue_rate_median", "rescue_rate_std",
-            "rescue_rate_q25", "rescue_rate_q75",
-            "tasks_rescued_pct", "tasks_rescued_mean",
-            "full_success_rate", "full_success_count", "failure_count",
-        ])
+        writer.writerow(["episode", "n_tasks", "n_realizations",
+                         "tasks_rescued_pct", var_col])
         for k in keys:
-            pct  = data_dict[k]          # values in [0, 1]
-            n    = len(pct)
-            nt   = k if n_tasks is None else n_tasks   # per-row n_tasks
-            full_success_rate = float(np.mean(pct >= 1.0 - 1e-6))
-            writer.writerow([
-                label_fmt.format(k),
-                n,
-                n_realizations,
-                nt,
-                f"{pct.mean():.6f}",
-                f"{np.median(pct):.6f}",
-                f"{pct.std():.6f}",
-                f"{np.percentile(pct, 25):.6f}",
-                f"{np.percentile(pct, 75):.6f}",
-                f"{pct.mean() * 100:.4f}",
-                f"{pct.mean() * nt:.4f}",
-                f"{full_success_rate:.6f}",
-                f"{full_success_rate * n:.4f}",
-                f"{(1 - full_success_rate) * n:.4f}",
-            ])
+            pct = data_dict[k]          # values in [0, 1]
+            nt  = k if n_tasks is None else n_tasks
+            for ep, val in enumerate(pct):
+                writer.writerow([
+                    ep,
+                    nt,
+                    n_realizations,
+                    f"{val * 100:.4f}",
+                    label_fmt.format(k),
+                ])
 
     print(f"  Saved → {out_path}")
 
