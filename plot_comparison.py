@@ -4,10 +4,7 @@ For each test (hazards / spread / tasks) both methods are drawn at the same
 x-position, offset slightly left (RL) and right (traditional).
 
 RL boxes     — proper quartiles from monte_carlo_analysis.py output CSVs.
-Traditional  — approximated from aggregate statistics using a Bernoulli-std
-               estimate:  σ = sqrt(p·(1−p)/n) · 100,  where  p = tasks_rescued_pct/100
-               and n = num_trials.  q1 ≈ mean − 0.674σ,  q3 ≈ mean + 0.674σ.
-               Whiskers extend to 1.5 × IQR, clipped to [0, 100].
+Traditional  — from raw data CSVs where each row is a trial with a specific parameter value (e.g. hazard_count) and a per-trial rescue percentage (tasks_rescued_pct).
 
 Median connection lines
   RL          — red solid  line through RL medians

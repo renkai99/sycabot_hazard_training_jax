@@ -110,12 +110,16 @@ def _make_episode_keys(n_episodes, seed):
 
 
 def _run_episodes(env, env_params, network, trained_params,
-                  episode_keys, max_steps):
-    """Run one episode per key; return float32 array of (delivered / total_tasks).
+                  episode_keys, max_steps, n_realizations=1):
+    """Run episodes and return float32 array of rescue rates, one entry per episode.
 
-    episode_keys  pre-generated array of shape (n_episodes, 2); the same array
-                  should be passed for every configuration within a test so that
-                  episode i always has the same initial state.
+    episode_keys    shape (n_episodes, 2); shared across configurations so that
+                    episode i always resets to the same initial layout.
+    n_realizations  number of stochastic rollouts to average per episode.
+                    Each realization starts from the same reset state but uses
+                    a different PRNG chain, giving different fire spread and
+                    robot-death outcomes.  The mean over realizations becomes
+                    the single data point for that episode.
     """
     import sycabot_env_jax as em
     n_tasks    = em.NUM_TASKS
@@ -130,24 +134,31 @@ def _run_episodes(env, env_params, network, trained_params,
     results = np.empty(n_episodes, dtype=np.float32)
 
     for ep in tqdm(range(n_episodes), desc="    episodes", leave=False, ncols=70):
-        # Each episode starts from a fixed, configuration-independent key so
-        # that the reset (robot positions, task positions, fire seed locations)
-        # is identical across all configurations being compared.
-        rng = episode_keys[ep]
-        rng, reset_key = jax.random.split(rng)
-        obs, state = env.reset_env(reset_key, env_params)
+        # Derive a stable reset key and a per-episode base key.
+        # reset_key is the same for all realizations of this episode so the
+        # initial robot / task / fire-seed positions are identical.
+        ep_rng = episode_keys[ep]
+        ep_rng, reset_key = jax.random.split(ep_rng)
 
-        done = False
-        step = 0
-        while not done and step < max_steps:
-            rng, ak, sk = jax.random.split(rng, 3)
-            action = _infer(obs, ak)
-            obs, state, _, done, _ = env.step_env(sk, state, action, env_params)
-            done = bool(done)
-            step += 1
+        realization_rates = np.empty(n_realizations, dtype=np.float32)
+        for r in range(n_realizations):
+            # Each realization gets a unique step-level PRNG so fire spread
+            # and stochastic deaths differ, but the starting layout is fixed.
+            step_rng = jax.random.fold_in(ep_rng, r)
+            obs, state = env.reset_env(reset_key, env_params)
 
-        delivered   = float(jnp.sum(state.task_status == 2))
-        results[ep] = delivered / n_tasks
+            done = False
+            step = 0
+            while not done and step < max_steps:
+                step_rng, ak, sk = jax.random.split(step_rng, 3)
+                action = _infer(obs, ak)
+                obs, state, _, done, _ = env.step_env(sk, state, action, env_params)
+                done = bool(done)
+                step += 1
+
+            realization_rates[r] = float(jnp.sum(state.task_status == 2)) / n_tasks
+
+        results[ep] = realization_rates.mean()
 
     return results
 
@@ -156,16 +167,16 @@ def _run_episodes(env, env_params, network, trained_params,
 #  Individual tests                                                            #
 # =========================================================================== #
 
-def test_hazards(n_episodes, max_steps, seed, hazard_counts, out_dir):
-    """Box plot: rescue rate vs. num_initial_fires  (fixed r=2, t=3)."""
-    print("\n=== Test 1: number of initial hazards (r=2, t=3) ===")
-    path = _find_best_policy(2, 3)
+def test_hazards(n_episodes, max_steps, seed, hazard_counts, out_dir, n_realizations=1):
+    """Box plot: rescue rate vs. num_initial_fires  (fixed r=2, t=2)."""
+    print("\n=== Test 1: number of initial hazards (r=2, t=2) ===")
+    path = _find_best_policy(2, 2)
     if path is None:
-        print("  No r2t3 policy found — skipping")
+        print("  No r2t2 policy found — skipping")
         return
     print(f"  Policy: {path}")
 
-    env, base_params, network, params = _build_env_and_network(2, 3, path)
+    env, base_params, network, params = _build_env_and_network(2, 2, path)
 
     # Shared keys: episode i uses the same reset key for every hazard count.
     # _spawn_fire samples _MAX_INITIAL_FIRES cells with replace=False then
@@ -177,29 +188,30 @@ def test_hazards(n_episodes, max_steps, seed, hazard_counts, out_dir):
     for n in hazard_counts:
         ep_params = base_params.replace(num_initial_fires=n)
         pct = _run_episodes(env, ep_params, network, params,
-                            episode_keys, max_steps)
+                            episode_keys, max_steps, n_realizations)
         data[n] = pct
         print(f"  hazards={n:2d}:  mean={pct.mean():.1%}  "
               f"median={np.median(pct):.1%}  std={pct.std():.1%}")
 
-    _save_csv(data, var_col="hazard_count", n_tasks=3,
-              out_path=os.path.join(out_dir, "hazards_results.csv"))
+    _save_csv(data, var_col="hazard_count", n_tasks=2,
+              out_path=os.path.join(out_dir, "hazards_results.csv"),
+              n_realizations=n_realizations)
     _boxplot(data,
              xlabel="Number of initial hazards",
              title="Rescue rate vs. number of initial hazards\n(2 robots, 2 tasks)",
              out_path=os.path.join(out_dir, "hazards_boxplot.png"))
 
 
-def test_spread(n_episodes, max_steps, seed, spread_rates, out_dir):
-    """Box plot: rescue rate vs. fire_spread_prob  (fixed r=2, t=3)."""
-    print("\n=== Test 2: fire spread rate (r=2, t=3) ===")
-    path = _find_best_policy(2, 3)
+def test_spread(n_episodes, max_steps, seed, spread_rates, out_dir, n_realizations=1):
+    """Box plot: rescue rate vs. fire_spread_prob  (fixed r=2, t=2)."""
+    print("\n=== Test 2: fire spread rate (r=2, t=2) ===")
+    path = _find_best_policy(2, 2)
     if path is None:
-        print("  No r2t3 policy found — skipping")
+        print("  No r2t2 policy found — skipping")
         return
     print(f"  Policy: {path}")
 
-    env, base_params, network, params = _build_env_and_network(2, 3, path)
+    env, base_params, network, params = _build_env_and_network(2, 2, path)
 
     # Shared keys: episode i starts from identical robot / task / fire positions
     # for every spread rate; only the fire propagation dynamics differ.
@@ -209,14 +221,14 @@ def test_spread(n_episodes, max_steps, seed, spread_rates, out_dir):
     for rate in spread_rates:
         ep_params = base_params.replace(fire_spread_prob=float(rate))
         pct = _run_episodes(env, ep_params, network, params,
-                            episode_keys, max_steps)
+                            episode_keys, max_steps, n_realizations)
         data[rate] = pct
         print(f"  spread={rate:.4f}:  mean={pct.mean():.1%}  "
               f"median={np.median(pct):.1%}  std={pct.std():.1%}")
 
-    _save_csv(data, var_col="spread_rate", n_tasks=3,
+    _save_csv(data, var_col="spread_rate", n_tasks=2,
               out_path=os.path.join(out_dir, "spread_results.csv"),
-              label_fmt="{:.4f}")
+              label_fmt="{:.4f}", n_realizations=n_realizations)
     _boxplot(data,
              xlabel="Fire spread probability per step",
              title="Rescue rate vs. fire spread rate\n(2 robots, 2 tasks)",
@@ -224,7 +236,7 @@ def test_spread(n_episodes, max_steps, seed, spread_rates, out_dir):
              label_fmt="{:.3f}")
 
 
-def test_tasks(n_episodes, max_steps, seed, task_counts, out_dir):
+def test_tasks(n_episodes, max_steps, seed, task_counts, out_dir, n_realizations=1):
     """Box plot: rescue rate vs. num_tasks, using the matching r2t{n} policy."""
     print("\n=== Test 3: number of tasks (r=2, policy matched per task count) ===")
 
@@ -245,7 +257,7 @@ def test_tasks(n_episodes, max_steps, seed, task_counts, out_dir):
 
         env, env_params, network, params = _build_env_and_network(2, n_tasks, path)
         pct = _run_episodes(env, env_params, network, params,
-                            episode_keys, max_steps)
+                            episode_keys, max_steps, n_realizations)
         data[n_tasks] = pct
         print(f"    mean={pct.mean():.1%}  median={np.median(pct):.1%}  "
               f"std={pct.std():.1%}")
@@ -253,7 +265,8 @@ def test_tasks(n_episodes, max_steps, seed, task_counts, out_dir):
     if data:
         # n_tasks=None → each row uses its key (the task count) as n_tasks
         _save_csv(data, var_col="num_tasks", n_tasks=None,
-                  out_path=os.path.join(out_dir, "tasks_results.csv"))
+                  out_path=os.path.join(out_dir, "tasks_results.csv"),
+                  n_realizations=n_realizations)
         _boxplot(data,
                  xlabel="Number of tasks",
                  title="Rescue rate vs. number of tasks\n(2 robots, matched policy)",
@@ -264,7 +277,8 @@ def test_tasks(n_episodes, max_steps, seed, task_counts, out_dir):
 #  CSV export                                                                  #
 # =========================================================================== #
 
-def _save_csv(data_dict, var_col, n_tasks, out_path, label_fmt="{}"):
+def _save_csv(data_dict, var_col, n_tasks, out_path, label_fmt="{}",
+              n_realizations=1):
     """Write per-configuration summary statistics to a CSV file.
 
     n_tasks  fixed int for hazard/spread tests; pass None for the tasks test,
@@ -274,6 +288,7 @@ def _save_csv(data_dict, var_col, n_tasks, out_path, label_fmt="{}"):
     -------
     <var_col>           value of the varied parameter
     num_episodes        episodes run per configuration
+    n_realizations      stochastic rollouts averaged per episode
     n_tasks             number of tasks per episode
     rescue_rate_mean    mean(delivered / n_tasks) across episodes  [0–1]
     rescue_rate_median  median of the same
@@ -294,7 +309,7 @@ def _save_csv(data_dict, var_col, n_tasks, out_path, label_fmt="{}"):
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
-            var_col, "num_episodes", "n_tasks",
+            var_col, "num_episodes", "n_realizations", "n_tasks",
             "rescue_rate_mean", "rescue_rate_median", "rescue_rate_std",
             "rescue_rate_q25", "rescue_rate_q75",
             "tasks_rescued_pct", "tasks_rescued_mean",
@@ -308,6 +323,7 @@ def _save_csv(data_dict, var_col, n_tasks, out_path, label_fmt="{}"):
             writer.writerow([
                 label_fmt.format(k),
                 n,
+                n_realizations,
                 nt,
                 f"{pct.mean():.6f}",
                 f"{np.median(pct):.6f}",
@@ -382,9 +398,11 @@ def parse_args():
                         choices=["hazards", "spread", "tasks"],
                         default=["hazards", "spread", "tasks"],
                         help="Which tests to run (default: all three)")
-    parser.add_argument("--episodes",  type=int,   default=50,
-                        help="Episodes per configuration (default: 50)")
-    parser.add_argument("--max-steps", type=int,   default=1000,
+    parser.add_argument("--episodes",      type=int, default=10,
+                        help="Episodes per configuration (default: 10)")
+    parser.add_argument("--realizations", type=int, default=3,
+                        help="Stochastic rollouts averaged per episode (default: 3)")
+    parser.add_argument("--max-steps",    type=int, default=1000,
                         help="Max steps per episode (default: 1000)")
     parser.add_argument("--seed",      type=int,   default=0)
     parser.add_argument("--out-dir",   type=str,   default="mc_results",
@@ -407,21 +425,22 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     print(f"Episodes per config : {args.episodes}")
+    print(f"Realizations/episode: {args.realizations}")
     print(f"Max steps / episode : {args.max_steps}")
     print(f"Output directory    : {args.out_dir}")
     print(f"JAX devices         : {jax.devices()}")
 
     if "hazards" in args.test:
         test_hazards(args.episodes, args.max_steps, args.seed,
-                     args.hazard_counts, args.out_dir)
+                     args.hazard_counts, args.out_dir, args.realizations)
 
     if "spread" in args.test:
         test_spread(args.episodes, args.max_steps, args.seed,
-                    args.spread_rates, args.out_dir)
+                    args.spread_rates, args.out_dir, args.realizations)
 
     if "tasks" in args.test:
         test_tasks(args.episodes, args.max_steps, args.seed,
-                   args.task_counts, args.out_dir)
+                   args.task_counts, args.out_dir, args.realizations)
 
     print("\nDone.")
 
