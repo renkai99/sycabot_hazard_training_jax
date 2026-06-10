@@ -29,7 +29,6 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 from flax import serialization
-from tqdm import tqdm
 
 # ActorCritic and its hyperparameters do not depend on NUM_ROBOTS / NUM_TASKS
 # (they take explicit action_dim / hidden_size args), so importing once is safe.
@@ -109,58 +108,80 @@ def _make_episode_keys(n_episodes, seed):
     return jax.random.split(jax.random.PRNGKey(seed), n_episodes)
 
 
+# Module-level cache so that calling _run_episodes multiple times with the
+# same (env, policy, max_steps, n_realizations, n_tasks) — e.g. for different
+# hazard counts or spread rates within one test — reuses the compiled XLA
+# binary instead of recompiling for every configuration.
+_run_all_cache: dict = {}
+
+
 def _run_episodes(env, env_params, network, trained_params,
                   episode_keys, max_steps, n_realizations=1):
-    """Run episodes and return float32 array of rescue rates, one entry per episode.
+    """Run all episodes × realizations in a single JIT-compiled JAX kernel.
 
-    episode_keys    shape (n_episodes, 2); shared across configurations so that
-                    episode i always resets to the same initial layout.
-    n_realizations  number of stochastic rollouts to average per episode.
-                    Each realization starts from the same reset state but uses
-                    a different PRNG chain, giving different fire spread and
-                    robot-death outcomes.  The mean over realizations becomes
-                    the single data point for that episode.
+    episode_keys    shape (n_episodes, 2); shared across configurations.
+    n_realizations  independent stochastic rollouts averaged per episode.
+
+    All three loops (episodes / realizations / steps) are eliminated from
+    Python and replaced with:
+      jax.lax.scan  over max_steps      — tight GPU loop, no Python overhead
+      jax.vmap      over n_realizations — parallel fire-spread trajectories
+      jax.vmap      over n_episodes     — parallel episodes
+      jax.jit       over everything     — one compiled XLA kernel per config type
     """
     import sycabot_env_jax as em
-    n_tasks    = em.NUM_TASKS
+    n_tasks = em.NUM_TASKS
+
+    cache_key = (id(env), id(trained_params), max_steps, n_realizations, n_tasks)
+
+    if cache_key not in _run_all_cache:
+        print("    Compiling JAX kernel ...", flush=True)
+
+        def _run_realization(reset_key, step_rng, params):
+            obs, state = env.reset_env(reset_key, params)
+            step_keys = jax.random.split(step_rng, max_steps)
+
+            def _step(carry, sk):
+                state, obs, done = carry
+                pi, _ = network.apply({"params": trained_params}, obs)
+                action = pi.mean
+                new_obs, new_state, _, step_done, _ = env.step_env(
+                    sk, state, action, params)
+                # Freeze state and obs once the episode is done so that
+                # lax.scan can continue for max_steps without corrupting
+                # the final result.
+                frozen_state = jax.tree_util.tree_map(
+                    lambda a, b: jnp.where(done, a, b), state, new_state)
+                frozen_obs = jnp.where(done, obs, new_obs)
+                return (frozen_state, frozen_obs, done | step_done), None
+
+            (final_state, _, _), _ = jax.lax.scan(
+                _step, (state, obs, jnp.bool_(False)), step_keys)
+            return jnp.sum(final_state.task_status == 2).astype(jnp.float32) / n_tasks
+
+        def _run_episode(ep_key, params):
+            ep_rng, reset_key = jax.random.split(ep_key)
+            # Each realization uses a different step-level PRNG (different fire
+            # spread / death randomness) but the same reset_key (same layout).
+            real_rngs = jax.vmap(
+                lambda r: jax.random.fold_in(ep_rng, r))(jnp.arange(n_realizations))
+            rates = jax.vmap(
+                lambda srng: _run_realization(reset_key, srng, params))(real_rngs)
+            return rates.mean()
+
+        @jax.jit
+        def _run_all(keys, params):
+            return jax.vmap(lambda k: _run_episode(k, params))(keys)
+
+        _run_all_cache[cache_key] = _run_all
+
+    _run_all = _run_all_cache[cache_key]
     n_episodes = len(episode_keys)
-
-    # JIT the policy; one compilation per (network, params) pair.
-    @jax.jit
-    def _infer(obs, key):
-        pi, _ = network.apply({"params": trained_params}, obs)
-        return pi.mean   # deterministic
-
-    results = np.empty(n_episodes, dtype=np.float32)
-
-    for ep in tqdm(range(n_episodes), desc="    episodes", leave=False, ncols=70):
-        # Derive a stable reset key and a per-episode base key.
-        # reset_key is the same for all realizations of this episode so the
-        # initial robot / task / fire-seed positions are identical.
-        ep_rng = episode_keys[ep]
-        ep_rng, reset_key = jax.random.split(ep_rng)
-
-        realization_rates = np.empty(n_realizations, dtype=np.float32)
-        for r in range(n_realizations):
-            # Each realization gets a unique step-level PRNG so fire spread
-            # and stochastic deaths differ, but the starting layout is fixed.
-            step_rng = jax.random.fold_in(ep_rng, r)
-            obs, state = env.reset_env(reset_key, env_params)
-
-            done = False
-            step = 0
-            while not done and step < max_steps:
-                step_rng, ak, sk = jax.random.split(step_rng, 3)
-                action = _infer(obs, ak)
-                obs, state, _, done, _ = env.step_env(sk, state, action, env_params)
-                done = bool(done)
-                step += 1
-
-            realization_rates[r] = float(jnp.sum(state.task_status == 2)) / n_tasks
-
-        results[ep] = realization_rates.mean()
-
-    return results
+    print(f"    Running {n_episodes} episodes × {n_realizations} realizations ...",
+          flush=True)
+    results = _run_all(episode_keys, env_params)
+    jax.block_until_ready(results)
+    return np.array(results)
 
 
 # =========================================================================== #
@@ -374,10 +395,10 @@ def parse_args():
                         choices=["hazards", "spread", "tasks"],
                         default=["hazards", "spread", "tasks"],
                         help="Which tests to run (default: all three)")
-    parser.add_argument("--episodes",      type=int, default=10,
-                        help="Episodes per configuration (default: 10)")
-    parser.add_argument("--realizations", type=int, default=3,
-                        help="Stochastic rollouts averaged per episode (default: 3)")
+    parser.add_argument("--episodes",      type=int, default=20,
+                        help="Episodes per configuration (default: 20)")
+    parser.add_argument("--realizations", type=int, default=1000,
+                        help="Stochastic rollouts averaged per episode (default: 1000)")
     parser.add_argument("--max-steps",    type=int, default=1000,
                         help="Max steps per episode (default: 1000)")
     parser.add_argument("--seed",      type=int,   default=0)

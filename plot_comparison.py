@@ -73,18 +73,34 @@ def _read_trad_csv(path):
 
     rows = {}
     for key, vals in groups.items():
-        arr    = np.array(vals, dtype=np.float32)
-        med    = float(np.median(arr))
-        q1     = float(np.percentile(arr, 25))
-        q3     = float(np.percentile(arr, 75))
-        iqr    = q3 - q1
+        arr  = np.array(vals, dtype=np.float32)
+        med  = float(np.median(arr))
+        q1   = float(np.percentile(arr, 25))
+        q3   = float(np.percentile(arr, 75))
+        iqr  = q3 - q1
+        # Whiskers follow matplotlib's default convention: the actual max/min
+        # data point within the Tukey fence (q ± 1.5*IQR), not the fence itself.
+        # Using the theoretical fence value instead would pull whiskers inward
+        # whenever the IQR is small but the data has high-scoring episodes.
+        lo_fence = q1 - 1.5 * iqr
+        hi_fence = q3 + 1.5 * iqr
+        within_lo = arr[arr >= lo_fence]
+        within_hi = arr[arr <= hi_fence]
+        # Clamp to [whislo ≤ q1] and [whishi ≥ q3].
+        # With linear-interpolation percentiles, Q1/Q3 can land in a gap
+        # between actual data points, making within_lo.min() > Q1 — which
+        # causes ax.bxp() to draw the lower whisker upward into the box body.
+        # Clamping prevents this; the flier list preserves out-of-fence values.
+        whislo = min(float(within_lo.min()), q1) if len(within_lo) else q1
+        whishi = max(float(within_hi.max()), q3) if len(within_hi) else q3
+        fliers = arr[(arr < lo_fence) | (arr > hi_fence)].tolist()
         rows[key] = {
             "med":    med,
             "q1":     q1,
             "q3":     q3,
-            "whislo": max(0.0,   q1 - 1.5 * iqr),
-            "whishi": min(100.0, q3 + 1.5 * iqr),
-            "fliers": [],
+            "whislo": whislo,
+            "whishi": whishi,
+            "fliers": fliers,
         }
     return rows
 
@@ -121,11 +137,14 @@ def _comparison_plot(rl_rows, trad_rows, xlabel, title, out_path, label_fmt="{}"
             positions   = valid_pos,
             widths      = BOX_WIDTH,
             patch_artist= True,
-            showfliers  = False,
+            showfliers  = True,
             boxprops    = dict(facecolor=color, alpha=0.65, edgecolor="black", linewidth=1.1),
             medianprops = dict(color="orange",  linewidth=2.0),
             whiskerprops= dict(color="black",   linewidth=1.0),
             capprops    = dict(color="black",   linewidth=1.0),
+            flierprops  = dict(marker="o", markersize=3, alpha=0.55,
+                               markerfacecolor=color, markeredgecolor="black",
+                               markeredgewidth=0.5),
         )
 
     _draw_boxes(rl_rows,   rl_pos,   RL_COLOR,   "RL policy")
